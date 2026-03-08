@@ -1,70 +1,46 @@
 ﻿using AuthenticationTest.Entities;
 using AuthenticationTest.Models;
+using AuthenticationTest.Services;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
+using System.Threading.Tasks;
 
 namespace AuthenticationTest.Controllers
 {
     [Route("api/[controller]")]
     [ApiController]
-    public class AuthController(IConfiguration configuration) : ControllerBase
+    public class AuthController(IAuthService authService) : ControllerBase
     {
 
         public static User user = new User();
 
         [HttpPost("register")]
-        public ActionResult<User> Register(UserDto request)
+        public async Task<ActionResult<User>> Register(UserDto request)
         {
-            var hashedPassword = BCrypt.Net.BCrypt.HashPassword(request.Password);
-            user.Username = request.Username;
-            user.PasswordHash = hashedPassword;
+            var user = await authService.RegisterAsync(request);
+            if (user is null)
+            {
+                return BadRequest("Username already existed.");
+            }
             return Ok(user);
         }
 
         [HttpPost("login")]
-        public ActionResult<string> Login(UserDto request)
+        public async Task<ActionResult<string>> Login(UserDto request)
         {
-            if (user.Username != request.Username)
+            var token = await authService.LoginAsync(request);
+            if(token is null)
             {
-                return BadRequest("User not found.");
+                return BadRequest("Invalid username or password.");
             }
-            if (!BCrypt.Net.BCrypt.Verify(request.Password, user.PasswordHash))
-            {
-                return BadRequest("Wrong password.");
-            }
-
-            var token = CreateToken(user);
 
             return Ok(token);
         }
 
-        private string CreateToken(User user)
-        {
-            var claims = new List<Claim>
-            {
-                new Claim(ClaimTypes.Name, user.Username)
-            };
-
-            var key = new SymmetricSecurityKey(
-                Encoding.UTF8.GetBytes(configuration.GetValue<string>("AppSettings:Token")!));
-
-            // the key must be at least 128 bits (16 bytes) for HmacSha512,
-            // so ensure that the token in the configuration is sufficiently long
-            var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha512);
-
-            var tokenDescriptor = new JwtSecurityToken(
-                issuer: configuration.GetValue<string>("AppSettings:Issuer"),
-                audience: configuration.GetValue<string>("AppSettings:Audience"),
-                claims: claims,
-                expires: DateTime.UtcNow.AddDays(1),
-                signingCredentials: creds
-            );
-
-            return new JwtSecurityTokenHandler().WriteToken(tokenDescriptor);
-        }
+        
     }
 }
