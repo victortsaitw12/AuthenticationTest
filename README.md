@@ -8,6 +8,7 @@
 2. 設計用戶數據模型
 3. 實現安全的密碼管理（密碼雜湊）
 4. 構建用戶註冊和登入 API 端點
+5. 生成 JWT Token 進行身份驗證
 
 ---
 
@@ -48,6 +49,14 @@ dotnet add package BCrypt.Net-Next
 - ✅ 工作因子可調整，隨著硬件進步而增加難度
 - ✅ 計算速度慢（意圖），使暴力攻擊不可行
 - ❌ 不要使用：簡單的 MD5、SHA1 或 SHA256（無 salt）
+
+### 安裝 JWT Token 相關套件
+
+```bash
+dotnet add package System.IdentityModel.Tokens.Jwt
+```
+
+**System.IdentityModel.Tokens.Jwt** 是 Microsoft 提供的 JWT 處理庫，用於生成和驗證 JWT Token。JWT（JSON Web Token）是一種無狀態的身份驗證方式，常用於 API 認證。
 
 ---
 
@@ -197,8 +206,9 @@ public ActionResult<string> Login(UserDto request)
         return BadRequest("Wrong password.");
     }
 
-    // 登入成功
-    return Ok("Login successful.");
+    // 登入成功，生成 JWT Token
+    var token = CreateToken(user);
+    return Ok(token);
 }
 ```
 
@@ -212,7 +222,10 @@ curl -X POST https://localhost:7XXX/api/auth/login \
   -d '{"username":"john_doe","password":"SecurePassword123!"}'
 ```
 
-**響應：** `200 OK - "Login successful."`
+**響應：** `200 OK` - 返回 JWT Token
+```
+eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9.eyJodHRwOi8vc2NoZW1hcy54bWxzb2FwLm9yZy8yMDAzLzA1L2lkZW50aXR5L2NsYWltcy9uYW1lIjoiam9obl9kb2UiLCJpc3MiOiJNeUFwcCIsImF1ZCI6Ik15QXBwVXNlcnMiLCJleHAiOjE3MDk5NDEyMDB9.aBcDeFgHiJkLmNoPqRsTuVwXyZ...
+```
 
 **錯誤的密碼：**
 
@@ -274,6 +287,207 @@ BCrypt.Net.BCrypt.Verify(request.Password, user.PasswordHash)
 
 ---
 
+## 第五步：生成 JWT Token
+
+### 什麼是 JWT？
+
+**JWT（JSON Web Token）** 是一種緊湊、自包含的令牌格式，用於安全傳輸用戶身份信息。JWT 由三個部分組成，用點號（.）分隔：
+
+```
+[Header].[Payload].[Signature]
+```
+
+**範例：**
+```
+eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9
+.
+eyJodHRwOi8vc2NoZW1hcy54bWxzb2FwLm9yZy8yMDAzLzA1L2lkZW50aXR5L2NsYWltcy9uYW1lIjoiam9obiIsImlzcyI6Ik15QXBwIn0
+.
+aBcDeFgHiJkLmNoPqRsTuVwXyZ1a2b3c4d5e6f7g8h9i0jk1lm2no3pq4rs5tu6vw7xy8z
+```
+
+**三個部分的含義：**
+
+1. **Header（標頭）** - Base64 編碼的 JSON
+   ```json
+   {
+     "alg": "HS512",      // 簽名算法
+     "typ": "JWT"         // Token 類型
+   }
+   ```
+
+2. **Payload（負載）** - Base64 編碼的 JSON，包含 Claims（聲明）
+   ```json
+   {
+     "http://schemas.xmlsoap.org/2003/05/identity/claims/name": "john",
+     "iss": "MyApp",                  // Issuer（發行者）
+     "aud": "MyAppUsers",             // Audience（受眾）
+     "exp": 1709941200               // Expiration（過期時間，Unix 時間戳）
+   }
+   ```
+
+3. **Signature（簽名）** - 用密鑰和算法對前兩部分進行簽名
+   - 確保 Token 未被篡改
+   - 只有知道密鑰的服務器才能生成有效的簽名
+
+### JWT Token 配置（appsettings.json）
+
+```json
+{
+  "AppSettings": {
+    "Token": "YourSecretKeyMustBeAtLeast64BytesLongForHmacSha512AlgorithmSuperSecure!",
+    "Issuer": "MyApp",
+    "Audience": "MyAppUsers"
+  }
+}
+```
+
+**配置說明：**
+- **Token** - 用於簽名的密鑰，必須足夠長（HmacSha512 至少 64 字節）
+  - ⚠️ **重要：** 在生產環境中不應該寫在代碼中，應使用環境變數或 Secrets Manager
+- **Issuer** - 發行 Token 的應用程式名稱
+- **Audience** - 這個 Token 的接收方
+
+### CreateToken 方法的實現
+
+`Controllers/AuthController.cs` - Token 生成方法：
+
+```csharp
+private string CreateToken(User user)
+{
+    // 1. 創建 Claims（聲明），存儲用戶身份信息
+    var claims = new List<Claim>
+    {
+        new Claim(ClaimTypes.Name, user.Username)
+    };
+
+    // 2. 從配置讀取密鑰
+    var key = new SymmetricSecurityKey(
+        Encoding.UTF8.GetBytes(configuration.GetValue<string>("AppSettings:Token")!));
+
+    // 3. 創建簽名憑證（指定算法：HmacSha512）
+    var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha512);
+
+    // 4. 構建 Token 對象
+    var tokenDescriptor = new JwtSecurityToken(
+        issuer: configuration.GetValue<string>("AppSettings:Issuer"),
+        audience: configuration.GetValue<string>("AppSettings:Audience"),
+        claims: claims,
+        expires: DateTime.UtcNow.AddDays(1),          // Token 有效期：1 天
+        signingCredentials: creds                       // 簽名憑證
+    );
+
+    // 5. 序列化為 JWT 字符串
+    return new JwtSecurityTokenHandler().WriteToken(tokenDescriptor);
+}
+```
+
+### 工作原理詳解
+
+**第一步：創建 Claims**
+```csharp
+var claims = new List<Claim>
+{
+    new Claim(ClaimTypes.Name, user.Username)
+};
+```
+- Claims 是 Payload 中的鍵值對，存儲用戶信息
+- `ClaimTypes.Name` 是用戶名的標準聲明類型
+- 未來可添加其他 Claims：角色、權限、郵件等
+
+**第二步：讀取密鑰並創建簽名憑證**
+```csharp
+var key = new SymmetricSecurityKey(
+    Encoding.UTF8.GetBytes(configuration.GetValue<string>("AppSettings:Token")!));
+var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha512);
+```
+- 密鑰用於簽名，確保 Token 來自可信源
+- HmacSha512 是加密安全的簽名算法
+
+**第三步：構建並簽名 Token**
+```csharp
+var tokenDescriptor = new JwtSecurityToken(
+    issuer: "MyApp",
+    audience: "MyAppUsers",
+    claims: claims,
+    expires: DateTime.UtcNow.AddDays(1),
+    signingCredentials: creds
+);
+```
+- 設置發行者、受眾、Claims 和過期時間
+- 使用簽名憑證對 Token 進行簽名
+
+**第四步：序列化為字符串**
+```csharp
+return new JwtSecurityTokenHandler().WriteToken(tokenDescriptor);
+```
+- 轉換為 `header.payload.signature` 格式的字符串
+- 客戶端在後續請求中發送這個 Token
+
+### Token 流程圖
+
+```
+用戶登入
+   ↓
+驗證用戶名和密碼
+   ↓
+密碼正確
+   ↓
+生成 Claims（包含用戶信息）
+   ↓
+使用密鑰和 HmacSha512 算法簽名
+   ↓
+返回 JWT Token 字符串給客戶端
+   ↓
+客戶端存儲 Token（通常在 localStorage 或 Cookie）
+   ↓
+後續請求在 Authorization Header 中發送 Token
+   ↓
+服務器驗證簽名，確認 Token 有效且未被篡改
+```
+
+### Claims 的概念
+
+Claims 是 JWT 中存儲的身份信息，格式為 `Key: Value`：
+
+**常見 Claims（標準類型）：**
+| ClaimTypes | 含義 |
+|-----------|------|
+| `ClaimTypes.Name` | 用戶名 |
+| `ClaimTypes.Email` | 郵件地址 |
+| `ClaimTypes.Role` | 用戶角色 |
+| `ClaimTypes.DateOfBirth` | 出生日期 |
+
+**在本例中：**
+```csharp
+new Claim(ClaimTypes.Name, user.Username)
+```
+- Key：`http://schemas.xmlsoap.org/2003/05/identity/claims/name`（ClaimTypes.Name 的完整值）
+- Value：`john`（用戶的用戶名）
+
+**Token 過期時間的重要性：**
+```csharp
+expires: DateTime.UtcNow.AddDays(1)
+```
+- Token 有效期設為 1 天
+- 客户端無法延長 Token 有效期（Token 中包含過期時間，無法修改而不破壞簽名）
+- 當 Token 過期時，用戶需要重新登入或使用刷新 Token（後續分支會講解）
+
+### 密鑰長度的重要性
+
+```csharp
+// HmacSha512 對密鑰長度有要求
+// 至少 128 位（16 字節）用於 HS256
+// 至少 256 位（32 字節）用於 HS384
+// 至少 512 位（64 字節）用於 HS512
+```
+
+**本專案配置：**
+- 使用 HmacSha512，要求密鑰至少 64 字節
+- appsettings.json 中的 Token 值正好符合此要求
+
+---
+
 ## 測試 API 端點
 
 ### 使用 Scalar 界面測試
@@ -305,7 +519,15 @@ POST /api/auth/login
 }
 ```
 
-**預期結果：** ✅ `200 OK - "Login successful."`
+**預期結果：** ✅ `200 OK` - 返回 JWT Token
+```
+eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9.eyJodHRwOi8vc2NoZW1hcy54bWxzb2FwLm9yZy8yMDAzLzA1L2lkZW50aXR5L2NsYWltcy9uYW1lIjoiYWxpY2UiLCJpc3MiOiJNeUFwcCIsImF1ZCI6Ik15QXBwVXNlcnMiLCJleHAiOjE3MDk5NDEyMDB9.aBcDeFgHiJkLmNoPqRsTuVwXyZ1a2b3c4d5e6f7g8h9i0jk1lm2no3pq4rs5tu6vw7xy8z
+```
+
+**Token 構成說明：**
+- 前 2 部分用點號分隔：`[Header].[Payload]`
+- 最後一部分是簽名，確保 Token 未被篡改
+- 客戶端應將這個 Token 存儲，用於後續請求的身份驗證
 
 **第三步：嘗試用錯誤密碼登入**
 
@@ -330,6 +552,11 @@ POST /api/auth/login
 | **BCrypt** | 專為密碼安全設計的雜湊算法，包含自適應成本因子 |
 | **DTO** | 數據傳輸物件，用於分離 API 請求模型和數據庫實體模型 |
 | **Scalar** | 現代化的 API 文檔和測試工具 |
+| **JWT Token** | JSON Web Token，由 Header、Payload、Signature 三部分組成的身份驗證令牌 |
+| **Claims** | JWT 中存儲的身份信息（如用戶名、角色等）的鍵值對 |
+| **Issuer** | 發行 JWT Token 的應用程式（通常是自己的後端服務） |
+| **Audience** | JWT Token 的預期接收方 |
+| **Signature** | JWT 的簽名部分，用密鑰和算法對前兩部分進行簽名，確保 Token 未被篡改 |
 
 ---
 
@@ -347,12 +574,12 @@ POST /api/auth/login
 
 ## 進階話題預告
 
-本分支是 JWT 認證系統的第一部分。後續分支將涵蓋：
-- 🔑 JWT token 的生成和驗證
-- 🛡️ API 認證中間件的實現
-- 💾 持久化數據存儲（數據庫集成）
-- 🔐 刷新 token 機制
-- 👤 用戶聲明（Claims）和授權
+本分支涵蓋了基本的用戶認證和 JWT Token 生成。後續分支將涵蓋：
+- 🛡️ API 認證中間件的實現（驗證 Token）
+- 💾 持久化數據存儲（數據庫集成，目前使用靜態變數）
+- 🔐 刷新 Token 機制（防止 Token 過期頻繁要求重新登入）
+- 👤 擴展 Claims 和授權（添加用戶角色、權限等）
+- 📝 輸入驗證和錯誤處理的增強
 
 ---
 
