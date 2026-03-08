@@ -724,14 +724,86 @@ builder.Services.AddDbContext<UserDbContext>(options =>
 - `options.UseSqlServer()` - 指定使用 SQL Server 作為資料庫提供者
 - `builder.Configuration.GetConnectionString("DefaultConnection")` - 從 appsettings.json 讀取連接字符串
 
+> **💡 提示：** 完成此步驟後，就可以在 Visual Studio 的套件管理器控制台中使用 EF Core 命令（如 `Add-Migration` 和 `Update-Database`）來管理資料庫遷移。
+
 ### 創建資料庫遷移
 
 **遷移（Migration）** 是 EF Core 用來管理資料庫結構變化的機制。
 
-執行以下命令創建初始遷移：
+#### 方法 1：使用命令行工具
+
+在終端/PowerShell 中執行：
 
 ```bash
 dotnet ef migrations add Initial
+```
+
+#### 方法 2：使用 Visual Studio 套件管理器控制台（推薦）
+
+**優勢：**
+- 在 IDE 內部執行，無需切換到外部工具
+- 自動識別項目上下文
+- 視覺化反饋
+
+**步驟：**
+
+1. **打開套件管理器控制台**
+   - 菜單：`Tools` → `NuGet Package Manager` → `Package Manager Console`
+   - 或按快捷鍵：`Ctrl + ~` （在 Visual Studio 中）
+
+2. **在控制台輸入遷移命令**
+
+```powershell
+Add-Migration Initial
+```
+
+**命令詳解：**
+- `Add-Migration` - 創建新遷移
+- `Initial` - 遷移的名稱（可自定義，通常第一個取名 `Initial`）
+
+**完整的遷移命令參考：**
+
+| 命令 | 說明 |
+|------|------|
+| `Add-Migration [Name]` | 創建新遷移（[Name] 替換為遷移名稱） |
+| `Update-Database` | 將遷移應用到資料庫 |
+| `Update-Database -Migration [MigrationName]` | 回滾到指定的遷移 |
+| `Get-Migrations` | 列出所有遷移 |
+| `Remove-Migration` | 刪除最後一個遷移（只能在未應用到資料庫前刪除） |
+| `Update-Database 0` | 刪除所有遷移並清空資料庫 |
+
+**套件管理器控制台中的常見操作流程：**
+
+```powershell
+# 1. 創建初始遷移
+Add-Migration Initial
+
+# 2. 查看所有遷移
+Get-Migrations
+
+# 3. 應用遷移到資料庫
+Update-Database
+
+# 4. 修改模型後，創建新遷移
+Add-Migration AddNewColumn
+
+# 5. 應用新遷移
+Update-Database
+
+# 6. 如果需要回滾到上一個遷移
+Update-Database -Migration Initial
+```
+
+**控制台輸出示例：**
+
+```
+PM> Add-Migration Initial
+To undo this action, use Remove-Migration.
+
+PM> Update-Database
+Done. 0.123s
+
+PM>
 ```
 
 這會在 `Migrations/` 目錄下生成以下文件：
@@ -775,17 +847,28 @@ protected override void Down(MigrationBuilder migrationBuilder)
 
 ### 應用遷移到資料庫
 
-執行以下命令將遷移應用到資料庫：
+#### 方法 1：使用命令行工具
 
 ```bash
 dotnet ef database update
 ```
 
-這會：
+#### 方法 2：使用 Visual Studio 套件管理器控制台
+
+在套件管理器控制台中輸入：
+
+```powershell
+Update-Database
+```
+
+**執行結果：**
+
+無論使用哪種方法，都會完成以下步驟：
 1. 連接到 `appsettings.json` 中指定的資料庫
 2. 創建資料庫（如不存在）
 3. 執行遷移中的 SQL 命令
 4. 創建 Users 表
+5. 更新 `__EFMigrationsHistory` 表（追蹤已應用的遷移）
 
 ### 更新 AuthController 以使用資料庫
 
@@ -901,8 +984,18 @@ curl -X POST https://localhost:7XXX/api/auth/login \
 4. 測試 API
 ```
 
-**常見遷移命令：**
+**常見遷移命令對照表：**
 
+| 操作 | 命令行工具 | 套件管理器控制台 |
+|------|----------|----------------|
+| 列出所有遷移 | `dotnet ef migrations list` | `Get-Migrations` |
+| 創建遷移 | `dotnet ef migrations add [Name]` | `Add-Migration [Name]` |
+| 應用遷移 | `dotnet ef database update` | `Update-Database` |
+| 回滾到指定遷移 | `dotnet ef database update [Name]` | `Update-Database -Migration [Name]` |
+| 刪除最新遷移 | `dotnet ef migrations remove` | `Remove-Migration` |
+| 清空資料庫 | `dotnet ef database update 0` | `Update-Database -Migration 0` |
+
+**命令行工具示例：**
 ```bash
 # 列出所有遷移
 dotnet ef migrations list
@@ -915,6 +1008,21 @@ dotnet ef migrations remove
 
 # 刪除所有遷移並清空資料庫
 dotnet ef database update 0
+```
+
+**套件管理器控制台示例：**
+```powershell
+# 列出所有遷移
+Get-Migrations
+
+# 回滾到指定遷移
+Update-Database -Migration Initial
+
+# 刪除最新遷移
+Remove-Migration
+
+# 清空資料庫
+Update-Database -Migration 0
 ```
 
 ### DbContext 與資料庫的映射
