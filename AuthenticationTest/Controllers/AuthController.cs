@@ -1,6 +1,7 @@
 ﻿using AuthenticationTest.Entities;
 using AuthenticationTest.Models;
 using AuthenticationTest.Services;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.IdentityModel.Tokens;
@@ -15,9 +16,6 @@ namespace AuthenticationTest.Controllers
     [ApiController]
     public class AuthController(IAuthService authService) : ControllerBase
     {
-
-        public static User user = new User();
-
         [HttpPost("register")]
         public async Task<ActionResult<User>> Register(UserDto request)
         {
@@ -41,6 +39,12 @@ namespace AuthenticationTest.Controllers
             return Ok(token);
         }
 
+        [Authorize]
+        [HttpGet]
+        public IActionResult AuthenticatedOnlyEndpoint()
+        {
+            return Ok("You are authenticated.");
+        }
         
     }
 }
