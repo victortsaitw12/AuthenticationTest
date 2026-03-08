@@ -1,293 +1,24 @@
-# JWT 認證系統教學 - 第一部分：用戶註冊與登入
+# JWT 認證系統教學 - 第二部分：生成 JWT Token
 
 ## 專案概述
 
 本專案是一個針對初級 .NET 工程師的教學範例，展示如何在 ASP.NET Core Web API 中實現用戶認證系統。本分支重點講解如何：
 
-1. 安裝並配置必要的 NuGet 套件
-2. 設計用戶數據模型
-3. 實現安全的密碼管理（密碼雜湊）
-4. 構建用戶註冊和登入 API 端點
-5. 生成 JWT Token 進行身份驗證
+1. 理解 JWT（JSON Web Token）的結構和原理
+2. 配置 JWT Token 的密鑰和參數
+3. 在登入時生成 JWT Token
+4. 理解 Claims 在 Token 中的角色
+5. 使用 JWT Token 進行身份驗證
 
 ---
 
-## 第一步：安裝必要的 NuGet 套件
-
-### 安裝 Scalar
-
-**Scalar** 是一個現代化的 API 文檔工具，用來替代傳統的 Swagger UI。它提供更美觀的界面和更好的開發體驗。
-
-```bash
-dotnet add package Scalar.AspNetCore
-```
-
-在 `Program.cs` 中進行配置：
-
-```csharp
-// 添加 OpenAPI 支持
-builder.Services.AddOpenApi();
-
-// 在開發環境中啟用 OpenAPI 和 Scalar
-if (app.Environment.IsDevelopment())
-{
-    app.MapOpenApi();
-    app.MapScalarApiReference();
-}
-```
-
-### 安裝 BCrypt.Net-Next
-
-**BCrypt** 是一個密碼雜湊庫，專門為安全存儲密碼而設計。與簡單的 SHA256 等算法不同，BCrypt 使用自適應的工作因子，隨著計算機性能提升而自動調整難度，確保長期安全性。
-
-```bash
-dotnet add package BCrypt.Net-Next
-```
-
-**為什麼使用 BCrypt？**
-- ✅ 自動添加 salt，防止彩虹表攻擊
-- ✅ 工作因子可調整，隨著硬件進步而增加難度
-- ✅ 計算速度慢（意圖），使暴力攻擊不可行
-- ❌ 不要使用：簡單的 MD5、SHA1 或 SHA256（無 salt）
-
-### 安裝 JWT Token 相關套件
-
-```bash
-dotnet add package System.IdentityModel.Tokens.Jwt
-```
-
-**System.IdentityModel.Tokens.Jwt** 是 Microsoft 提供的 JWT 處理庫，用於生成和驗證 JWT Token。JWT（JSON Web Token）是一種無狀態的身份驗證方式，常用於 API 認證。
+> **前置知識：** 請先完成前一個分支 (`1_Register_And_Login`)，了解用戶註冊和登入的基本實現。
 
 ---
 
-## 第二步：設計用戶數據模型
+## 第一步：生成 JWT Token
 
-### User 實體類
-
-`Entities/User.cs` - 代表數據庫中的用戶記錄：
-
-```csharp
-namespace AuthenticationTest.Entities
-{
-    public class User
-    {
-        public string Username { get; set; } = string.Empty;
-        public string PasswordHash { get; set; } = string.Empty;
-    }
-}
-```
-
-**重要概念：**
-- `Username` - 用戶名，用於識別用戶
-- `PasswordHash` - 密碼的雜湊值，**永遠不存儲明文密碼**
-
-### UserDto（數據傳輸物件）
-
-`Models/UserDto.cs` - 用於 API 請求的數據模型：
-
-```csharp
-namespace AuthenticationTest.Models
-{
-    public class UserDto
-    {
-        public string Username { get; set; } = string.Empty;
-        public string Password { get; set; } = string.Empty;
-    }
-}
-```
-
-**為什麼要分離 Entity 和 DTO？**
-- 🔒 DTO 接收明文密碼，Entity 只存儲雜湊值
-- 🛡️ 避免直接暴露數據庫結構給客戶端
-- 🔄 在複雜系統中實現數據驗證和轉換的邏輯分離
-
----
-
-## 第三步：實現註冊 API
-
-### 註冊端點代碼
-
-`Controllers/AuthController.cs`：
-
-```csharp
-[HttpPost("register")]
-public ActionResult<User> Register(UserDto request)
-{
-    // 使用 BCrypt 將明文密碼轉換為雜湊值
-    var hashedPassword = BCrypt.Net.BCrypt.HashPassword(request.Password);
-
-    // 將用戶信息存儲到數據庫（此例中為靜態變數）
-    user.Username = request.Username;
-    user.PasswordHash = hashedPassword;
-
-    // 返回成功響應
-    return Ok(user);
-}
-```
-
-### 使用示例
-
-**使用 Scalar 或 cURL 測試：**
-
-```bash
-curl -X POST https://localhost:7XXX/api/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"username":"john_doe","password":"SecurePassword123!"}'
-```
-
-**響應示例：**
-
-```json
-{
-  "username": "john_doe",
-  "passwordHash": "$2a$11$sR9t5PyQKu4aDO.65huXbOpS5PxLLlwAXyVVZ..."
-}
-```
-
-### 密碼雜湊的原理
-
-BCrypt 的 `HashPassword()` 方法會**自動處理 salt**：
-
-```csharp
-var hashedPassword = BCrypt.Net.BCrypt.HashPassword(request.Password);
-// 這一行會自動：
-// 1. 生成隨機 salt
-// 2. 將 salt 與密碼組合並雜湊
-// 3. 返回包含 salt 的完整雜湊字符串
-```
-
-**內部流程：**
-1. **自動生成隨機 Salt** - BCrypt 在內部生成 16 字節的隨機 salt
-2. **多輪迭代** - 默認 11 輪（成本因子），使計算變慢，防止暴力攻擊
-3. **返回完整雜湊** - 格式為 `$2a$11$salt_hash_combined_value`
-
-**格式解釋：**
-```
-$2a           <- BCrypt 版本
-$11           <- 成本因子（工作輪數）
-$sR9t5PyQKu4aDO.65huXb  <- Salt（22 個字符）
-OpS5PxLLlwAXyVVZ...     <- 實際雜湊值
-```
-
-**關鍵點：Salt 已經包含在返回值中！**
-
-**範例 - 同一密碼的兩次雜湊：**
-```
-明文密碼: "password123"
-第一次雜湊: $2a$11$sR9t5PyQKu4aDO.65huXbOpS5PxLLlwAXyVVZ...
-第二次雜湊: $2a$11$K4aTTOMfsVeFzT5lIB.XnuK1DkSGeHQjDw3QN...
-（看起來完全不同，因為每次都生成不同的隨機 salt）
-```
-
-**為什麼相同密碼產生不同的雜湊值？**
-- 每次調用 `HashPassword()` 都會生成不同的隨機 salt
-- 即使密碼完全相同，salt 不同就會產生完全不同的雜湊值
-- 這防止了「彩虹表」攻擊（預先計算的密碼雜湊表）
-
----
-
-## 第四步：實現登入 API
-
-### 登入端點代碼
-
-```csharp
-[HttpPost("login")]
-public ActionResult<string> Login(UserDto request)
-{
-    // 驗證用戶名是否存在
-    if (user.Username != request.Username)
-    {
-        return BadRequest("User not found.");
-    }
-
-    // 驗證密碼（不直接比較，使用 BCrypt.Verify）
-    if (!BCrypt.Net.BCrypt.Verify(request.Password, user.PasswordHash))
-    {
-        return BadRequest("Wrong password.");
-    }
-
-    // 登入成功，生成 JWT Token
-    var token = CreateToken(user);
-    return Ok(token);
-}
-```
-
-### 使用示例
-
-**正確的密碼：**
-
-```bash
-curl -X POST https://localhost:7XXX/api/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"john_doe","password":"SecurePassword123!"}'
-```
-
-**響應：** `200 OK` - 返回 JWT Token
-```
-eyJhbGciOiJIUzUxMiIsInR5cCI6IkpXVCJ9.eyJodHRwOi8vc2NoZW1hcy54bWxzb2FwLm9yZy8yMDAzLzA1L2lkZW50aXR5L2NsYWltcy9uYW1lIjoiam9obl9kb2UiLCJpc3MiOiJNeUFwcCIsImF1ZCI6Ik15QXBwVXNlcnMiLCJleHAiOjE3MDk5NDEyMDB9.aBcDeFgHiJkLmNoPqRsTuVwXyZ...
-```
-
-**錯誤的密碼：**
-
-```bash
-curl -X POST https://localhost:7XXX/api/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"john_doe","password":"WrongPassword"}'
-```
-
-**響應：** `400 Bad Request - "Wrong password."`
-
-### 密碼驗證的原理
-
-BCrypt 的 `Verify()` 方法會從雜湊值中**自動提取 salt**：
-
-```csharp
-BCrypt.Net.BCrypt.Verify(request.Password, user.PasswordHash)
-// 這一行會：
-// 1. 從 user.PasswordHash 中提取 salt
-// 2. 用提取的 salt 對輸入密碼進行雜湊
-// 3. 比較新雜湊值與存儲的雜湊值
-```
-
-**驗證流程圖：**
-```
-用戶登入輸入: "password123"
-         ↓
-   提取存儲的雜湊值中的 salt
-         ↓
-   用相同 salt 對新密碼進行雜湊
-         ↓
-   比較新雜湊值 vs 存儲的雜湊值
-         ↓
-   相等? ✅ 登入成功 : ❌ 密碼錯誤
-```
-
-**為什麼這個方法安全？**
-- 不需要逆向雜湊值（在密碼學上是不可能的）
-- 只需要對輸入密碼進行同樣的雜湊操作
-- BCrypt 自動從儲存的值中提取 salt，確保兩次計算用的 salt 相同
-
-**範例：**
-```
-存儲的雜湊: $2a$11$sR9t5PyQKu4aDO.65huXbOpS5PxLLlwAXyVVZ...
-                       ↑ Salt 就包含在這裡
-
-用戶輸入 "password123"
-→ Verify() 提取 salt: sR9t5PyQKu4aDO.65huXb
-→ 用這個 salt 對 "password123" 雜湊
-→ 得到新雜湊: $2a$11$sR9t5PyQKu4aDO.65huXbOpS5PxLLlwAXyVVZ...
-→ 與存儲值比較 → 完全相同 ✅ 成功！
-
-如果用戶輸入 "wrongpassword"
-→ Verify() 提取相同的 salt
-→ 用同樣 salt 對 "wrongpassword" 雜湊
-→ 得到不同雜湊: $2a$11$sR9t5PyQKu4aDO.65huXbDifferentHashValue...
-→ 與存儲值比較 → 不同 ❌ 失敗！
-```
-
----
-
-## 第五步：生成 JWT Token
+本步驟講解如何實現 JWT Token 生成，並將其集成到登入流程中。
 
 ### 什麼是 JWT？
 
@@ -329,6 +60,14 @@ aBcDeFgHiJkLmNoPqRsTuVwXyZ1a2b3c4d5e6f7g8h9i0jk1lm2no3pq4rs5tu6vw7xy8z
 3. **Signature（簽名）** - 用密鑰和算法對前兩部分進行簽名
    - 確保 Token 未被篡改
    - 只有知道密鑰的服務器才能生成有效的簽名
+
+### 安裝 JWT Token 相關套件
+
+```bash
+dotnet add package System.IdentityModel.Tokens.Jwt
+```
+
+**System.IdentityModel.Tokens.Jwt** 是 Microsoft 提供的 JWT 處理庫，用於生成和驗證 JWT Token。
 
 ### JWT Token 配置（appsettings.json）
 
@@ -470,7 +209,7 @@ new Claim(ClaimTypes.Name, user.Username)
 expires: DateTime.UtcNow.AddDays(1)
 ```
 - Token 有效期設為 1 天
-- 客户端無法延長 Token 有效期（Token 中包含過期時間，無法修改而不破壞簽名）
+- 客戶端無法延長 Token 有效期（Token 中包含過期時間，無法修改而不破壞簽名）
 - 當 Token 過期時，用戶需要重新登入或使用刷新 Token（後續分支會講解）
 
 ### 密鑰長度的重要性
@@ -486,7 +225,31 @@ expires: DateTime.UtcNow.AddDays(1)
 - 使用 HmacSha512，要求密鑰至少 64 字節
 - appsettings.json 中的 Token 值正好符合此要求
 
----
+### 更新登入端點以返回 Token
+
+修改 `AuthController.cs` 的 `Login` 方法，在登入成功時返回 Token：
+
+```csharp
+[HttpPost("login")]
+public ActionResult<string> Login(UserDto request)
+{
+    // 驗證用戶名是否存在
+    if (user.Username != request.Username)
+    {
+        return BadRequest("User not found.");
+    }
+
+    // 驗證密碼（不直接比較，使用 BCrypt.Verify）
+    if (!BCrypt.Net.BCrypt.Verify(request.Password, user.PasswordHash))
+    {
+        return BadRequest("Wrong password.");
+    }
+
+    // ✅ 新增：登入成功，生成 JWT Token
+    var token = CreateToken(user);
+    return Ok(token);
+}
+```
 
 ## 測試 API 端點
 
@@ -541,22 +304,126 @@ POST /api/auth/login
 
 **預期結果：** ❌ `400 Bad Request - "Wrong password."`
 
+### 使用 cURL 測試
+
+```bash
+# 登入並獲取 Token
+curl -X POST https://localhost:7XXX/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"alice","password":"MyPassword123!"}'
+```
+
+## Token 解析和驗證
+
+### 在線 JWT 解析工具
+
+可以使用 [jwt.io](https://jwt.io) 來解析和查看 Token 的內容：
+
+1. 複製生成的 Token
+2. 粘貼到 jwt.io 的 Encoded 部分
+3. 查看 Header、Payload 和 Signature 的詳細內容
+
+### Token 驗證要點
+
+生成的 Token 應該包含以下驗證信息：
+
+**Header**
+```json
+{
+  "alg": "HS512",
+  "typ": "JWT"
+}
+```
+
+**Payload**
+```json
+{
+  "http://schemas.xmlsoap.org/2003/05/identity/claims/name": "alice",
+  "iss": "MyApp",
+  "aud": "MyAppUsers",
+  "exp": 1709941200,
+  "iat": 1709854800
+}
+```
+
 ---
 
-## 關鍵概念總結
+## 最佳實踐
 
-| 概念 | 說明 |
-|------|------|
-| **密碼雜湊** | 將密碼轉換為不可逆的字符串，只能驗證而不能還原 |
-| **Salt** | 隨機數據，用於確保相同密碼產生不同的雜湊值 |
-| **BCrypt** | 專為密碼安全設計的雜湊算法，包含自適應成本因子 |
-| **DTO** | 數據傳輸物件，用於分離 API 請求模型和數據庫實體模型 |
-| **Scalar** | 現代化的 API 文檔和測試工具 |
-| **JWT Token** | JSON Web Token，由 Header、Payload、Signature 三部分組成的身份驗證令牌 |
-| **Claims** | JWT 中存儲的身份信息（如用戶名、角色等）的鍵值對 |
-| **Issuer** | 發行 JWT Token 的應用程式（通常是自己的後端服務） |
-| **Audience** | JWT Token 的預期接收方 |
-| **Signature** | JWT 的簽名部分，用密鑰和算法對前兩部分進行簽名，確保 Token 未被篡改 |
+**1. 使用足夠長的密鑰**
+```csharp
+// ✅ 好：密鑰長度足夠（至少 64 字節）
+"Token": "YourSecretKeyMustBeAtLeast64BytesLongForHmacSha512AlgorithmSuperSecure!"
+
+// ❌ 不好：密鑰太短
+"Token": "short_key"
+```
+
+**2. 設置合理的過期時間**
+```csharp
+// ✅ 好：設置短期過期時間
+expires: DateTime.UtcNow.AddDays(1)
+
+// ❌ 不好：過期時間太長
+expires: DateTime.UtcNow.AddDays(365)
+```
+
+**3. 使用強簽名算法**
+```csharp
+// ✅ 好：使用 HmacSha512（強加密）
+var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha512);
+
+// ❌ 不好：使用弱算法
+var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+```
+
+**4. 不要在 Token 中存儲敏感信息**
+```csharp
+// ✅ 好：只存儲公開的身份信息
+var claims = new List<Claim>
+{
+    new Claim(ClaimTypes.Name, user.Username),
+    new Claim(ClaimTypes.NameIdentifier, user.Id.ToString())
+};
+
+// ❌ 不好：存儲密碼或其他敏感信息
+var claims = new List<Claim>
+{
+    new Claim("password", user.PasswordHash)  // 不要這樣做
+};
+```
+
+**5. 將密鑰存儲在配置中，不要硬編碼**
+```csharp
+// ✅ 好：從配置讀取
+var token = configuration.GetValue<string>("AppSettings:Token");
+
+// ❌ 不好：硬編碼
+var token = "YourSecretKey";
+```
+
+---
+
+## 常見問題
+
+### Q: Token 如何被驗證？
+
+Token 驗證包括三個步驟：
+1. **簽名驗證** - 使用公開的密鑰驗證簽名是否有效
+2. **Issuer 驗證** - 檢查 Token 是由授權的應用程式頒發
+3. **Audience 驗證** - 檢查 Token 是給予此應用程式的
+
+### Q: Token 可以被修改嗎？
+
+不可以。如果修改 Token 的任何部分（Header、Payload 或 Signature），簽名驗證就會失敗。因為簽名是基於原始的 Header 和 Payload 計算的。
+
+### Q: 為什麼需要密鑰？
+
+密鑰用於簽名 Token，只有知道密鑰的服務器才能生成有效的簽名。這確保了 Token 的真實性和完整性。
+
+### Q: Token 過期後怎麼辦？
+
+當 Token 過期時，客戶端需要重新登入獲取新的 Token，或者使用刷新 Token（如果實現了刷新機制）來獲取新的訪問 Token。
 
 ---
 
@@ -565,27 +432,37 @@ POST /api/auth/login
 ⚠️ **重要注意事項：**
 
 1. **永遠不要存儲明文密碼** - 即使是系統管理員也不應該看到用戶密碼
-2. **永遠不要從雜湊值還原密碼** - 這在密碼學上是不可能的（理論上）
-3. **使用 HTTPS** - 在生產環境中必須使用 HTTPS 加密傳輸
-4. **實現速率限制** - 防止暴力攻擊登入接口
-5. **添加日誌和監控** - 記錄失敗的登入嘗試
+2. **使用 HTTPS** - 在生產環境中必須使用 HTTPS 加密傳輸
+3. **實現速率限制** - 防止暴力攻擊登入接口
+4. **添加日誌和監控** - 記錄失敗的登入嘗試
+5. **保護密鑰** - 生產環境使用環境變數或 Secrets Manager，不要提交到 Git
 
 ---
 
 ## 進階話題預告
 
-本分支涵蓋了基本的用戶認證和 JWT Token 生成。後續分支將涵蓋：
-- 🛡️ API 認證中間件的實現（驗證 Token）
-- 💾 持久化數據存儲（數據庫集成，目前使用靜態變數）
-- 🔐 刷新 Token 機制（防止 Token 過期頻繁要求重新登入）
-- 👤 擴展 Claims 和授權（添加用戶角色、權限等）
-- 📝 輸入驗證和錯誤處理的增強
+本分支涵蓋了 JWT Token 的生成。後續分支將涵蓋：
+- 💾 數據庫集成（使用 EF Core 替代靜態變數）
+- 🏗️ Service 層重構（業務邏輯分離）
+- 🛡️ API 認證中間件（驗證 Token）
+- 👤 角色和授權（Role-based Authorization）
+- 🔐 刷新 Token 機制（防止 Token 過期）
 
 ---
 
 ## 參考資源
 
-- [BCrypt.Net-Next GitHub](https://github.com/BcryptNet/bcrypt.net-next)
-- [OWASP 密碼安全指南](https://owasp.org/www-project-cheat-sheets/cheatsheets/Authentication_Cheat_Sheet)
+### JWT 和安全
+- [JWT 規範 RFC 7519](https://tools.ietf.org/html/rfc7519)
+- [JWT.io 工具](https://jwt.io)
+- [OWASP 認證速查表](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html)
+- [OWASP JWT 安全指南](https://cheatsheetseries.owasp.org/cheatsheets/JSON_Web_Token_for_Java_Cheat_Sheet.html)
+
+### ASP.NET Core
+- [System.IdentityModel.Tokens.Jwt NuGet](https://www.nuget.org/packages/System.IdentityModel.Tokens.Jwt/)
 - [ASP.NET Core 安全最佳實踐](https://docs.microsoft.com/en-us/aspnet/core/security/)
-- [Scalar API 文檔](https://scalar.com/)
+- [ASP.NET Core Configuration](https://docs.microsoft.com/en-us/aspnet/core/fundamentals/configuration/)
+
+### 加密和簽名
+- [HMAC-SHA512 算法](https://en.wikipedia.org/wiki/HMAC)
+- [對稱加密密鑰管理](https://cheatsheetseries.owasp.org/cheatsheets/Cryptographic_Storage_Cheat_Sheet.html)
