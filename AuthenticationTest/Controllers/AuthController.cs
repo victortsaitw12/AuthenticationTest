@@ -106,9 +106,27 @@ namespace AuthenticationTest.Controllers
 
         // ── Claim-Based Authorization 示範端點 ──────────────────────────────
 
+        // 特性方式：使用 Policy 名稱，要求 Token 必須包含 NameIdentifier Claim
+        [Authorize(Policy = "HasUserId")]
+        [HttpGet("my-id")]
+        public IActionResult GetMyId()
+        {
+            var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+            return Ok(new { UserId = userId });
+        }
+
+        // 特性方式：使用 Policy 名稱，要求 Role Claim 值為 "Admin"
+        // 示範：Role 本質上也是一種 Claim，[Authorize(Roles="Admin")] 是它的語法糖
+        [Authorize(Policy = "RequireAdminClaim")]
+        [HttpGet("admin-via-claim")]
+        public IActionResult AdminViaClaimPolicy()
+        {
+            return Ok("Accessed via RequireAdminClaim policy (Role is just a Claim).");
+        }
+
         /// <summary>
         /// 用戶只能更新自己的資料，Admin 可以更新任何人的資料。
-        /// 使用 IAuthorizationService 進行程式化 Claim-Based 授權檢查。
+        /// 程式化方式：需要傳入 resource（userId），特性方式無法做到這點。
         /// </summary>
         [Authorize]
         [HttpPut("{userId:guid}/profile")]

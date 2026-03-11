@@ -5,10 +5,11 @@
 本專案是一個針對初級 .NET 工程師的教學範例，展示如何在 ASP.NET Core Web API 中實現用戶認證系統。本分支重點講解如何：
 
 1. 理解 Claim 與 Role 的本質差別
-2. 建立自定義的 `IAuthorizationRequirement`
-3. 實作 `AuthorizationHandler<TRequirement, TResource>` 進行資源授權
-4. 使用 `IAuthorizationService` 進行程式化授權檢查
-5. 實現「用戶只能操作自己的資源」這類常見授權場景
+2. 使用特性方式（`[Authorize(Policy = "...")]`）進行 Claim 授權
+3. 建立自定義的 `IAuthorizationRequirement`
+4. 實作 `AuthorizationHandler<TRequirement, TResource>` 進行資源授權
+5. 使用 `IAuthorizationService` 進行程式化授權檢查
+6. 理解特性方式與程式化方式的差別與適用場景
 
 ---
 
@@ -66,6 +67,106 @@ ClaimTypes.Role = "http://schemas.microsoft.com/ws/2008/06/identity/claims/role"
 | 用途 | 功能訪問控制 | 資源所有權、屬性匹配 |
 | 範例 | "Admin", "Manager" | userId, department, email |
 | 靈活性 | 低 | 高 |
+
+### 特性方式（Attribute Way）：使用 RequireClaim 定義 Policy
+
+Claim-Based Authorization 也可以用 `[Authorize(Policy = "...")]` 特性的方式使用，只要在 `Program.cs` 中用 `RequireClaim()` 定義好 Policy 即可。
+
+#### 在 Program.cs 中定義 Policy
+
+```csharp
+builder.Services.AddAuthorization(options =>
+{
+    // 要求 Token 必須包含 NameIdentifier Claim（即已登入且有 UserId）
+    options.AddPolicy("HasUserId", policy =>
+        policy.RequireClaim(ClaimTypes.NameIdentifier));
+
+    // 要求 Role Claim 值為 "Admin"
+    // 這等同於 [Authorize(Roles = "Admin")]，但用 Claim 的角度來理解
+    options.AddPolicy("RequireAdminClaim", policy =>
+        policy.RequireClaim(ClaimTypes.Role, "Admin"));
+});
+```
+
+**`RequireClaim()` 的兩種用法：**
+
+```csharp
+// 只檢查 Claim 是否存在（不管值是什麼）
+policy.RequireClaim(ClaimTypes.NameIdentifier);
+
+// 檢查 Claim 存在，且值必須是列表中的其中一個（OR 邏輯）
+policy.RequireClaim(ClaimTypes.Role, "Admin", "SuperAdmin");
+```
+
+#### 在 Controller 使用 [Authorize(Policy = "...")]
+
+```csharp
+// 要求 Token 必須包含 NameIdentifier Claim
+[Authorize(Policy = "HasUserId")]
+[HttpGet("my-id")]
+public IActionResult GetMyId()
+{
+    var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+    return Ok(new { UserId = userId });
+}
+
+// 要求 Role Claim 值為 "Admin"
+[Authorize(Policy = "RequireAdminClaim")]
+[HttpGet("admin-via-claim")]
+public IActionResult AdminViaClaimPolicy()
+{
+    return Ok("Accessed via RequireAdminClaim policy.");
+}
+```
+
+#### 揭示 Role 的本質
+
+`RequireClaim(ClaimTypes.Role, "Admin")` 與 `[Authorize(Roles = "Admin")]` 在功能上完全相同。這說明了一個重要概念：
+
+> **角色（Role）本質上就是一種 Claim。**
+> `[Authorize(Roles = "Admin")]` 只是 `RequireClaim(ClaimTypes.Role, "Admin")` 的語法糖。
+
+```
+[Authorize(Roles = "Admin")]
+     ↓ 等同於
+[Authorize(Policy = "RequireAdminClaim")]
+     ↓ 其中 Policy 定義為
+policy.RequireClaim(ClaimTypes.Role, "Admin")
+     ↓ 底層就是檢查
+User.Claims.Any(c => c.Type == ClaimTypes.Role && c.Value == "Admin")
+```
+
+### 特性方式 vs 程式化方式
+
+| 對比 | 特性方式 `[Authorize(Policy)]` | 程式化方式 `IAuthorizationService` |
+|------|-------------------------------|-----------------------------------|
+| **適用場景** | 靜態規則（不依賴請求中的資料） | 動態規則（需要傳入資源物件） |
+| **能否傳 Resource** | ❌ 否 | ✅ 是 |
+| **程式碼位置** | 特性（方法外部） | 方法內部 |
+| **範例** | 「必須是 Admin」 | 「只能修改自己的資料」 |
+
+**何時必須用程式化方式？**
+
+```csharp
+// ❌ 這樣無法確認 userId 是否屬於目前登入的用戶
+[Authorize(Policy = "SameUser")]  // Policy 無法知道 userId 是誰
+[HttpPut("{userId:guid}/profile")]
+public IActionResult UpdateProfile(Guid userId) { ... }
+
+// ✅ 必須用程式化方式，才能把 userId 傳給 Handler 做比對
+[Authorize]
+[HttpPut("{userId:guid}/profile")]
+public async Task<IActionResult> UpdateProfile(Guid userId)
+{
+    var result = await authorizationService.AuthorizeAsync(
+        User,
+        userId,                    // ← resource 在這裡傳入
+        new SameUserRequirement());
+    // ...
+}
+```
+
+---
 
 ### ASP.NET Core 授權架構
 
