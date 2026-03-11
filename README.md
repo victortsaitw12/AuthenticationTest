@@ -15,6 +15,19 @@
 
 ---
 
+## 本分支異動的檔案
+
+| 狀態 | 檔案 | 異動內容 |
+|------|------|---------|
+| 新增 | `Requirements/MinimumRoleLevelRequirement.cs` | `RoleLevel` enum + `MinimumRoleLevelRequirement` |
+| 新增 | `Handlers/MinimumRoleLevelAuthorizationHandler.cs` | 處理 `MinimumRoleLevelRequirement` 的 Handler |
+| 修改 | `Program.cs` | 新增 `AddAuthorization()`（三條 Policy + FallbackPolicy）、註冊新 Handler |
+| 修改 | `Controllers/AuthController.cs` | 公開端點加 `[AllowAnonymous]`；新增 `reports`、`system-config`、`users/{id}`（刪除）、`dashboard` 端點 |
+| 修改 | `Services/IAuthService.cs` | 新增 `DeleteUserAsync` |
+| 修改 | `Services/AuthService.cs` | 實作 `DeleteUserAsync` |
+
+---
+
 ## 第十三步：Policy-Based Authorization
 
 ### Branch 9 留下的問題
