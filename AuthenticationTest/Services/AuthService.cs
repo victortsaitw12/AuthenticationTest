@@ -99,14 +99,57 @@ namespace AuthenticationTest.Services
             return refreshToken;
         }
 
+        public async Task<User?> GrantRoleAsync(Guid userId, string role)
+        {
+            var user = await context.Users.FindAsync(userId);
+            if (user is null) return null;
+
+            var roles = user.Role.Split(',', StringSplitOptions.RemoveEmptyEntries)
+                             .Select(r => r.Trim())
+                             .ToList();
+
+            if (!roles.Contains(role, StringComparer.OrdinalIgnoreCase))
+            {
+                roles.Add(role);
+                user.Role = string.Join(",", roles);
+                await context.SaveChangesAsync();
+            }
+
+            return user;
+        }
+
+        public async Task<User?> RevokeRoleAsync(Guid userId, string role)
+        {
+            var user = await context.Users.FindAsync(userId);
+            if (user is null) return null;
+
+            var roles = user.Role.Split(',', StringSplitOptions.RemoveEmptyEntries)
+                             .Select(r => r.Trim())
+                             .Where(r => !r.Equals(role, StringComparison.OrdinalIgnoreCase))
+                             .ToList();
+
+            user.Role = string.Join(",", roles);
+            await context.SaveChangesAsync();
+
+            return user;
+        }
+
         private string CreateToken(User user)
         {
             var claims = new List<Claim>
             {
                 new Claim(ClaimTypes.Name, user.Username),
-                new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()),
-                new Claim(ClaimTypes.Role, user.Role)
+                new Claim(ClaimTypes.NameIdentifier, user.Id.ToString())
             };
+
+            // 支援多重角色：將逗號分隔的角色字串轉換為多個 Role Claims
+            var roles = user.Role.Split(',', StringSplitOptions.RemoveEmptyEntries)
+                             .Select(r => r.Trim())
+                             .Where(r => !string.IsNullOrEmpty(r));
+            foreach (var role in roles)
+            {
+                claims.Add(new Claim(ClaimTypes.Role, role));
+            }
 
             var key = new SymmetricSecurityKey(
                 Encoding.UTF8.GetBytes(configuration.GetValue<string>("AppSettings:Token")!));
