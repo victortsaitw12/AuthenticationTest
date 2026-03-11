@@ -145,6 +145,17 @@ namespace AuthenticationTest.Services
             return user;
         }
 
+        public async Task<User?> DeleteUserAsync(Guid userId)
+        {
+            var user = await context.Users.FindAsync(userId);
+            if (user is null) return null;
+
+            context.Users.Remove(user);
+            await context.SaveChangesAsync();
+
+            return user;
+        }
+
         private string CreateToken(User user)
         {
             var claims = new List<Claim>

@@ -104,33 +104,68 @@ namespace AuthenticationTest.Controllers
             return Ok(user);
         }
 
-        // ── Claim-Based Authorization 示範端點 ──────────────────────────────
-
-        /// <summary>
-        /// 用戶只能更新自己的資料，Admin 可以更新任何人的資料。
-        /// 使用 IAuthorizationService 進行程式化 Claim-Based 授權檢查。
-        /// </summary>
         [Authorize]
         [HttpPut("{userId:guid}/profile")]
         public async Task<IActionResult> UpdateProfile(Guid userId, [FromBody] string newUsername)
         {
-            // 使用 IAuthorizationService 進行資源授權：
-            // 傳入 resource = userId，讓 Handler 決定此用戶是否有權限操作
             var authResult = await authorizationService.AuthorizeAsync(
-                User,
-                userId,
-                new SameUserRequirement());
+                User, userId, new SameUserRequirement());
 
-            if (!authResult.Succeeded)
-            {
-                return Forbid();
-            }
+            if (!authResult.Succeeded) return Forbid();
 
-            // 授權成功，執行更新邏輯
             var user = await authService.UpdateUsernameAsync(userId, newUsername);
             if (user is null) return NotFound("User not found.");
 
             return Ok(user);
+        }
+
+        // ── Policy-Based Authorization 示範端點 ──────────────────────────────
+
+        // 使用具名 Policy：Manager 或以上等級才能訪問
+        [Authorize(Policy = "ManagerOrAbove")]
+        [HttpGet("reports")]
+        public IActionResult GetReports()
+        {
+            return Ok("Reports are available for Manager and above.");
+        }
+
+        // 使用具名 Policy：Admin 才能訪問
+        [Authorize(Policy = "AdminOnly")]
+        [HttpGet("system-config")]
+        public IActionResult GetSystemConfig()
+        {
+            return Ok("System configuration is only for Admins.");
+        }
+
+        // 使用組合 Policy：嚴格的 Admin 檢查（多個要求的 AND 組合）
+        [Authorize(Policy = "StrictAdminOnly")]
+        [HttpDelete("users/{userId:guid}")]
+        public async Task<IActionResult> DeleteUser(Guid userId)
+        {
+            var user = await authService.DeleteUserAsync(userId);
+            if (user is null) return NotFound("User not found.");
+            return Ok($"User {user.Username} has been deleted.");
+        }
+
+        // 程式化 Policy 評估：在方法內部動態決定使用哪個 Policy
+        [Authorize]
+        [HttpGet("dashboard")]
+        public async Task<IActionResult> GetDashboard()
+        {
+            // 根據用戶等級返回不同的儀表板內容
+            var adminCheck = await authorizationService.AuthorizeAsync(User, "AdminOnly");
+            if (adminCheck.Succeeded)
+            {
+                return Ok(new { level = "Admin", data = "Full system dashboard with all metrics." });
+            }
+
+            var managerCheck = await authorizationService.AuthorizeAsync(User, "ManagerOrAbove");
+            if (managerCheck.Succeeded)
+            {
+                return Ok(new { level = "Manager", data = "Team performance dashboard." });
+            }
+
+            return Ok(new { level = "User", data = "Personal activity dashboard." });
         }
     }
 }

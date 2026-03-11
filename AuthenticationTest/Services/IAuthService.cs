@@ -11,5 +11,6 @@ namespace AuthenticationTest.Services
         Task<User?> GrantRoleAsync(Guid userId, string role);
         Task<User?> RevokeRoleAsync(Guid userId, string role);
         Task<User?> UpdateUsernameAsync(Guid userId, string newUsername);
+        Task<User?> DeleteUserAsync(Guid userId);
     }
 }

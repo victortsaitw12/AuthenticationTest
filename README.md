@@ -1,424 +1,472 @@
-# JWT 認證系統教學 - 第九部分：基於 Claim 的授權（Claim-Based Authorization）
+# JWT 認證系統教學 - 第十部分：基於 Policy 的授權（Policy-Based Authorization）
 
 ## 專案概述
 
 本專案是一個針對初級 .NET 工程師的教學範例，展示如何在 ASP.NET Core Web API 中實現用戶認證系統。本分支重點講解如何：
 
-1. 理解 Claim 與 Role 的本質差別
-2. 建立自定義的 `IAuthorizationRequirement`
-3. 實作 `AuthorizationHandler<TRequirement, TResource>` 進行資源授權
-4. 使用 `IAuthorizationService` 進行程式化授權檢查
-5. 實現「用戶只能操作自己的資源」這類常見授權場景
+1. 理解 Policy-Based Authorization 的架構和優勢
+2. 使用 `AddAuthorization()` 定義具名授權策略
+3. 在 Policy 中組合多個 Requirement（AND 邏輯）
+4. 使用 `[Authorize(Policy = "...")]` 保護端點
+5. 使用 `IAuthorizationService` 進行程式化 Policy 評估
 
 ---
 
-> **前置知識：** 請先完成前八個分支，了解基本認證流程和角色授權。
+> **前置知識：** 請先完成前九個分支，特別是 `9_claim_based_authorization`，了解 `IAuthorizationRequirement` 和 `IAuthorizationHandler` 的工作原理。
 
 ---
 
-## 第十二步：基於 Claim 的授權
+## 第十三步：基於 Policy 的授權
 
-本步驟介紹比角色授權更靈活的 **Claim-Based Authorization**，並通過實際範例說明何時應該使用它。
+本步驟介紹 ASP.NET Core 中最靈活、最推薦的授權方式——**Policy-Based Authorization**。它將授權規則集中定義、命名，讓程式碼更清晰、更易於維護和測試。
 
-### 角色授權的局限性
+### 為什麼需要 Policy-Based Authorization？
 
-回顧 `8_role_based_authorization` 分支：
+#### 問題：魔術字串到處散落
+
+在前兩個分支中，授權規則分散在各個 Controller 中：
 
 ```csharp
-// 角色授權：只能問「你是什麼角色？」
-[Authorize(Roles = "Admin")]
-public IActionResult AdminOnly() { ... }
+// 同樣的「需要是 Admin 或 Manager」邏輯，出現在多個地方
+[Authorize(Roles = "Admin,Manager")]  // UserController
+[Authorize(Roles = "Admin,Manager")]  // ProductController
+[Authorize(Roles = "Admin,Manager")]  // OrderController
 ```
 
-**無法用角色授權解決的問題：**
+**問題：**
+1. 規則分散，難以維護
+2. 如果需要修改條件（例如加入 `Director` 角色），需要找到所有地方修改
+3. 無法組合複雜邏輯（例如「Manager 且年齡 >= 25」）
+4. 難以測試
 
-```
-需求：「用戶只能修改自己的個人資料」
+#### 解決方案：Policy 集中定義
 
-[Authorize(Roles = "User")]  // ❌ 這無法阻止 User A 修改 User B 的資料
-public IActionResult UpdateProfile(Guid userId) { ... }
-```
-
-這類問題需要**資源授權（Resource Authorization）**：授權決策不只取決於用戶是誰，還取決於**操作的對象（資源）**。
-
-### Claim 是什麼？
-
-Claim（聲明）是 JWT 中的鍵值對，描述用戶的屬性：
-
-```json
+```csharp
+// Program.cs - 集中定義，一處修改全部生效
+builder.Services.AddAuthorization(options =>
 {
-  "http://schemas.xmlsoap.org/2003/05/identity/claims/name": "alice",
-  "http://schemas.xmlsoap.org/2003/05/identity/claims/nameidentifier": "3fa85f64...",
-  "http://schemas.microsoft.com/ws/2008/06/identity/claims/role": "Admin"
+    options.AddPolicy("ManagerOrAbove", policy =>
+        policy.AddRequirements(new MinimumRoleLevelRequirement(RoleLevel.Manager)));
+});
+
+// Controller - 只需寫 Policy 名稱
+[Authorize(Policy = "ManagerOrAbove")]
+public IActionResult ManagePage() { ... }
+```
+
+### Policy 的組成
+
+一個 Policy 由一個或多個 **Requirement** 組成，所有 Requirement 必須**全部滿足**（AND 邏輯）才能授權成功：
+
+```
+Policy "StrictAdminOnly"
+├── RequireAuthenticatedUser()      ← 必須已登入
+├── RequireClaim(ClaimTypes.Name)   ← Token 必須包含 Name Claim
+└── MinimumRoleLevelRequirement(Admin) ← 必須是 Admin 等級
+    ↓ 全部通過 → 授權成功
+```
+
+### MinimumRoleLevelRequirement - 等級制授權
+
+#### Requirement 定義
+
+`Requirements/MinimumRoleLevelRequirement.cs`:
+
+```csharp
+/// <summary>
+/// 角色等級定義：數字越大，權限越高
+/// </summary>
+public enum RoleLevel
+{
+    User    = 1,
+    Manager = 2,
+    Admin   = 3
 }
-```
 
-**角色（Role）本質上也是一種 Claim：**
-```
-ClaimTypes.Role = "http://schemas.microsoft.com/ws/2008/06/identity/claims/role"
-```
-
-**Claim vs Role 的差別：**
-
-| 特性 | Role | Claim |
-|------|------|-------|
-| 粒度 | 粗粒度（身份標籤） | 細粒度（任何屬性） |
-| 用途 | 功能訪問控制 | 資源所有權、屬性匹配 |
-| 範例 | "Admin", "Manager" | userId, department, email |
-| 靈活性 | 低 | 高 |
-
-### ASP.NET Core 授權架構
-
-```
-[Authorize] 特性
-    ↓
-AuthorizationMiddleware
-    ↓
-IAuthorizationService.AuthorizeAsync()
-    ↓
-IAuthorizationHandler（可以有多個）
-    ↓
-AuthorizationHandlerContext（包含 User + Resource + Requirement）
-    ↓
-context.Succeed() / context.Fail()
-```
-
-**三個核心介面：**
-
-1. **`IAuthorizationRequirement`** - 定義授權的**要求**（What to check）
-2. **`AuthorizationHandler<TRequirement>`** - 實現授權的**邏輯**（How to check）
-3. **`IAuthorizationService`** - 執行授權的**服務**（Who runs the check）
-
-### 實作 SameUserRequirement
-
-#### Step 1：定義 Requirement
-
-`Requirements/SameUserRequirement.cs`:
-
-```csharp
-using Microsoft.AspNetCore.Authorization;
-
-namespace AuthenticationTest.Requirements
+/// <summary>
+/// 要求：用戶的角色等級必須達到指定的最低等級
+/// </summary>
+public class MinimumRoleLevelRequirement : IAuthorizationRequirement
 {
-    /// <summary>
-    /// 要求：只有資源擁有者本人（或 Admin）才能執行此操作
-    /// </summary>
-    public class SameUserRequirement : IAuthorizationRequirement { }
-}
-```
+    public RoleLevel MinimumLevel { get; }
 
-> **重點：** `IAuthorizationRequirement` 只是一個標記介面（Marker Interface），本身不包含邏輯。邏輯在 Handler 中實現。
-
-#### Step 2：實作 Handler
-
-`Handlers/SameUserAuthorizationHandler.cs`:
-
-```csharp
-using AuthenticationTest.Requirements;
-using Microsoft.AspNetCore.Authorization;
-using System.Security.Claims;
-
-namespace AuthenticationTest.Handlers
-{
-    /// <summary>
-    /// 處理 SameUserRequirement：
-    /// 允許條件：操作者是資源擁有者本人，或操作者是 Admin
-    /// </summary>
-    public class SameUserAuthorizationHandler
-        : AuthorizationHandler<SameUserRequirement, Guid>
+    public MinimumRoleLevelRequirement(RoleLevel minimumLevel)
     {
-        protected override Task HandleRequirementAsync(
-            AuthorizationHandlerContext context,
-            SameUserRequirement requirement,
-            Guid resourceUserId)           // ← resource 就是我們傳入的 userId
-        {
-            // 從 JWT Claims 取出目前登入用戶的 ID
-            var currentUserId = context.User.FindFirstValue(ClaimTypes.NameIdentifier);
-
-            // 條件一：操作的用戶 ID 等於資源擁有者的 ID（同一個人）
-            var isSameUser = currentUserId == resourceUserId.ToString();
-
-            // 條件二：操作者是 Admin，有權代替任何人操作
-            var isAdmin = context.User.IsInRole("Admin");
-
-            if (isSameUser || isAdmin)
-            {
-                context.Succeed(requirement);  // ✅ 授權成功
-            }
-            // 注意：不呼叫 context.Fail()，讓其他 Handler 有機會處理
-
-            return Task.CompletedTask;
-        }
+        MinimumLevel = minimumLevel;
     }
 }
 ```
 
-**Handler 泛型參數解析：**
+#### Handler 實作
+
+`Handlers/MinimumRoleLevelAuthorizationHandler.cs`:
 
 ```csharp
-AuthorizationHandler<SameUserRequirement, Guid>
-//                   ↑ Requirement 型別    ↑ Resource 型別
+public class MinimumRoleLevelAuthorizationHandler
+    : AuthorizationHandler<MinimumRoleLevelRequirement>
+{
+    // 角色名稱 → 等級的對應表
+    private static readonly Dictionary<string, RoleLevel> RoleLevelMap =
+        new(StringComparer.OrdinalIgnoreCase)
+    {
+        { "User",    RoleLevel.User    },
+        { "Manager", RoleLevel.Manager },
+        { "Admin",   RoleLevel.Admin   }
+    };
+
+    protected override Task HandleRequirementAsync(
+        AuthorizationHandlerContext context,
+        MinimumRoleLevelRequirement requirement)
+    {
+        // 取出用戶擁有的所有 Role Claims
+        var userRoles = context.User.FindAll(ClaimTypes.Role).Select(c => c.Value);
+
+        // 將角色名稱轉換為等級，取出最高等級
+        var highestLevel = userRoles
+            .Where(role => RoleLevelMap.ContainsKey(role))
+            .Select(role => RoleLevelMap[role])
+            .DefaultIfEmpty(0)
+            .Max();
+
+        if ((int)highestLevel >= (int)requirement.MinimumLevel)
+        {
+            context.Succeed(requirement);
+        }
+
+        return Task.CompletedTask;
+    }
+}
 ```
 
-- `TRequirement`：這個 Handler 處理哪種 Requirement
-- `TResource`：資源的型別（這裡是 `Guid`，代表用戶的 ID）
+**這個 Handler 的優點：**
 
-#### Step 3：在 Program.cs 註冊 Handler
+```
+用戶只有 "User" 角色（等級 1）
+    → MinimumRoleLevelRequirement(Manager) 要求等級 2
+    → 1 < 2 → 授權失敗
+
+用戶有 "Manager" 角色（等級 2）
+    → MinimumRoleLevelRequirement(Manager) 要求等級 2
+    → 2 >= 2 → 授權成功
+
+用戶有 "Admin" 角色（等級 3）
+    → MinimumRoleLevelRequirement(Manager) 要求等級 2
+    → 3 >= 2 → Admin 自然通過 Manager 等級要求
+```
+
+### 在 Program.cs 中定義 Policies
 
 ```csharp
-// 必須將 Handler 註冊到 DI 容器，ASP.NET Core 才能自動找到並執行它
+// 先註冊 Handlers
 builder.Services.AddScoped<IAuthorizationHandler, SameUserAuthorizationHandler>();
+builder.Services.AddScoped<IAuthorizationHandler, MinimumRoleLevelAuthorizationHandler>();
+
+// 定義具名授權策略
+builder.Services.AddAuthorization(options =>
+{
+    // 策略一：要求用戶已登入（最低門檻）
+    options.AddPolicy("AuthenticatedUser", policy =>
+        policy.RequireAuthenticatedUser());
+
+    // 策略二：要求 Manager 或以上等級
+    options.AddPolicy("ManagerOrAbove", policy =>
+        policy.AddRequirements(new MinimumRoleLevelRequirement(RoleLevel.Manager)));
+
+    // 策略三：要求 Admin 等級
+    options.AddPolicy("AdminOnly", policy =>
+        policy.AddRequirements(new MinimumRoleLevelRequirement(RoleLevel.Admin)));
+
+    // 策略四：組合多個要求（AND 邏輯）
+    options.AddPolicy("StrictAdminOnly", policy =>
+    {
+        policy.RequireAuthenticatedUser();
+        policy.RequireClaim(ClaimTypes.Name);
+        policy.AddRequirements(new MinimumRoleLevelRequirement(RoleLevel.Admin));
+    });
+});
 ```
 
-> **為什麼需要手動註冊？** 不同於 `[Authorize(Roles = "...")]`，自定義 Handler 不是框架內建的，需要顯式告訴 DI 容器它的存在。
+**Policy 的內建快捷方法：**
 
-#### Step 4：在 Controller 中使用 IAuthorizationService
+```csharp
+// 要求已認證
+policy.RequireAuthenticatedUser();
+
+// 要求擁有某個 Claim（只檢查 Key 存在）
+policy.RequireClaim("department");
+
+// 要求 Claim 等於特定值
+policy.RequireClaim("department", "Finance", "Accounting");
+
+// 要求擁有某個角色
+policy.RequireRole("Admin");
+
+// 要求同時擁有多個角色（AND）
+policy.RequireRole("Admin", "Auditor");  // 注意：此方法為 OR，非 AND
+
+// 自定義斷言（Assertion）
+policy.RequireAssertion(context =>
+    context.User.HasClaim(c => c.Type == "subscription" && c.Value == "premium"));
+```
+
+### 在 Controller 中使用 Policy
+
+#### 特性方式（靜態）
+
+```csharp
+// 使用具名 Policy：Manager 或以上等級
+[Authorize(Policy = "ManagerOrAbove")]
+[HttpGet("reports")]
+public IActionResult GetReports()
+{
+    return Ok("Reports for Manager and above.");
+}
+
+// 組合 Policy：嚴格的 Admin 檢查
+[Authorize(Policy = "StrictAdminOnly")]
+[HttpDelete("users/{userId:guid}")]
+public async Task<IActionResult> DeleteUser(Guid userId)
+{
+    var user = await authService.DeleteUserAsync(userId);
+    if (user is null) return NotFound("User not found.");
+    return Ok($"User {user.Username} has been deleted.");
+}
+```
+
+#### 程式化方式（動態）
 
 ```csharp
 [Authorize]
-[HttpPut("{userId:guid}/profile")]
-public async Task<IActionResult> UpdateProfile(Guid userId, [FromBody] string newUsername)
+[HttpGet("dashboard")]
+public async Task<IActionResult> GetDashboard()
 {
-    // 程式化授權：將資源（userId）傳給 Handler 進行判斷
-    var authResult = await authorizationService.AuthorizeAsync(
-        User,                      // ClaimsPrincipal（目前登入的用戶）
-        userId,                    // Resource（操作的目標用戶 ID）
-        new SameUserRequirement()  // Requirement（要滿足的條件）
-    );
-
-    if (!authResult.Succeeded)
+    // 動態評估不同 Policy，根據結果返回不同內容
+    var adminCheck = await authorizationService.AuthorizeAsync(User, "AdminOnly");
+    if (adminCheck.Succeeded)
     {
-        return Forbid();  // 403 Forbidden
+        return Ok(new { level = "Admin", data = "Full system dashboard." });
     }
 
-    // 授權成功，執行更新邏輯
-    var user = await authService.UpdateUsernameAsync(userId, newUsername);
-    if (user is null) return NotFound("User not found.");
-
-    return Ok(user);
-}
-```
-
-**`IAuthorizationService` 如何注入？**
-
-在 Controller 建構子中加入注入：
-```csharp
-public class AuthController(
-    IAuthService authService,
-    IAuthorizationService authorizationService  // ← 新增注入
-) : ControllerBase
-```
-
-`IAuthorizationService` 是 ASP.NET Core 內建服務，無需額外在 Program.cs 中註冊，`AddAuthorization()` 已自動完成。
-
-### 授權流程圖
-
-```
-PUT /api/auth/{userId}/profile
-
-[Authorize] 先確保用戶已登入
-   ↓
-進入 UpdateProfile 方法
-   ↓
-authorizationService.AuthorizeAsync(User, userId, SameUserRequirement)
-   ↓
-ASP.NET Core 找到所有處理 SameUserRequirement 的 Handler
-   ↓
-SameUserAuthorizationHandler.HandleRequirementAsync(context, requirement, userId)
-   ↓
-是否是同一個用戶 OR 是 Admin？
-   ├─ 是 → context.Succeed() → authResult.Succeeded = true → 繼續執行
-   └─ 否 → 不呼叫 Succeed → authResult.Succeeded = false → 403 Forbidden
-```
-
-### Claim 的讀取方式
-
-從 `context.User`（即 `ClaimsPrincipal`）讀取各種 Claim：
-
-```csharp
-// 讀取單個 Claim 值
-string? name = context.User.FindFirstValue(ClaimTypes.Name);
-string? userId = context.User.FindFirstValue(ClaimTypes.NameIdentifier);
-
-// 讀取所有同類型的 Claim（例如多重角色）
-var roles = context.User.FindAll(ClaimTypes.Role).Select(c => c.Value);
-
-// 自定義 Claim（直接使用字串 Key）
-string? department = context.User.FindFirstValue("department");
-
-// 使用 HasClaim 檢查是否有某個 Claim
-bool hasEmailClaim = context.User.HasClaim(c => c.Type == ClaimTypes.Email);
-bool isVerified = context.User.HasClaim("is_verified", "true");
-```
-
-### 在 JWT 中添加自定義 Claim
-
-若要讓 Token 攜帶自定義 Claim，在 `CreateToken()` 中添加：
-
-```csharp
-private string CreateToken(User user)
-{
-    var claims = new List<Claim>
+    var managerCheck = await authorizationService.AuthorizeAsync(User, "ManagerOrAbove");
+    if (managerCheck.Succeeded)
     {
-        new Claim(ClaimTypes.Name, user.Username),
-        new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()),
+        return Ok(new { level = "Manager", data = "Team performance dashboard." });
+    }
 
-        // 標準 Claim
-        // new Claim(ClaimTypes.Email, user.Email),
-
-        // 自定義 Claim（使用自定義字串 Key）
-        // new Claim("department", user.Department),
-        // new Claim("subscription_type", user.SubscriptionType),
-    };
-
-    // ... 其餘不變
+    return Ok(new { level = "User", data = "Personal activity dashboard." });
 }
 ```
 
-**自定義 Claim 的解析：**
+**程式化 Policy 評估的優點：**
 
-```csharp
-// 在 Handler 中讀取自定義 Claim
-var department = context.User.FindFirstValue("department");
-if (department == "Finance")
-{
-    context.Succeed(requirement);
-}
+不直接拒絕訪問（403），而是根據用戶等級返回不同的資料。這在建立「分級內容」的 API 時非常有用。
+
+### Policy vs Role vs Claim 的比較
+
+| 特性 | Role-Based | Claim-Based | Policy-Based |
+|------|-----------|-------------|-------------|
+| 定義位置 | Controller 特性 | Handler | Program.cs 集中定義 |
+| 可重用性 | 低 | 中 | 高 |
+| 可組合性 | 低（只能 OR） | 中（需手動組合） | 高（AND/OR 自由組合） |
+| 可測試性 | 低 | 中 | 高 |
+| 適合場景 | 簡單存取控制 | 資源所有權 | 複雜業務規則 |
+| 程式化評估 | 需要 IsInRole() | 需要 AuthorizeAsync | AuthorizeAsync + Policy 名稱 |
+
+**選擇指引：**
+
+```
+需求：「只有 Admin 才能訪問」
+→ 使用 [Authorize(Roles = "Admin")]（簡單夠用）
+
+需求：「用戶只能修改自己的資料」
+→ 使用 IAuthorizationService + SameUserRequirement（資源授權）
+
+需求：「Manager 且訂閱等級為 Premium 才能訪問高級報告」
+→ 使用 Policy（複雜組合邏輯）
+
+需求：「未來可能修改條件的業務規則」
+→ 使用 Policy（集中管理，易於維護）
+```
+
+### 授權架構全貌
+
+至此，本系列教學涵蓋了 ASP.NET Core 授權的完整架構：
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    授權架構                                  │
+├─────────────────┬──────────────────┬────────────────────────┤
+│   Role-Based    │   Claim-Based    │    Policy-Based        │
+├─────────────────┼──────────────────┼────────────────────────┤
+│ [Authorize      │ IAuthorization   │ [Authorize             │
+│  (Roles="...")]  │ Service +        │  (Policy="...")]        │
+│                 │ Requirement +    │ AddAuthorization()     │
+│                 │ Handler          │ + Requirements         │
+│                 │                  │ + Handlers             │
+├─────────────────┼──────────────────┼────────────────────────┤
+│ 粗粒度          │ 細粒度            │ 業務邏輯封裝            │
+│ 快速實作        │ 資源授權          │ 可重用、可測試          │
+└─────────────────┴──────────────────┴────────────────────────┘
 ```
 
 ---
 
 ## 測試 API 端點
 
-### 測試「用戶只能更新自己的資料」
+### 測試 Policy 端點
 
-**場景一：用戶更新自己的資料（應成功）**
+**準備：** 確保有三種等級的用戶：
+- `alice` - Role: "User"
+- `bob` - Role: "Manager"
+- `charlie` - Role: "Admin"
 
-1. 用戶 Alice 登入，取得 Token（Token 中含有 Alice 的 userId）
-2. 發送請求：
+**測試 ManagerOrAbove Policy：**
+
+| 用戶 | 請求 | 預期結果 |
+|------|------|---------|
+| alice (User) | `GET /api/auth/reports` | `403 Forbidden` |
+| bob (Manager) | `GET /api/auth/reports` | `200 OK` |
+| charlie (Admin) | `GET /api/auth/reports` | `200 OK` |
+
+**測試 AdminOnly Policy：**
+
+| 用戶 | 請求 | 預期結果 |
+|------|------|---------|
+| alice (User) | `GET /api/auth/system-config` | `403 Forbidden` |
+| bob (Manager) | `GET /api/auth/system-config` | `403 Forbidden` |
+| charlie (Admin) | `GET /api/auth/system-config` | `200 OK` |
+
+**測試動態 Dashboard：**
+
+| 用戶 | 請求 | 預期結果 |
+|------|------|---------|
+| alice (User) | `GET /api/auth/dashboard` | `200 OK` - Personal dashboard |
+| bob (Manager) | `GET /api/auth/dashboard` | `200 OK` - Team dashboard |
+| charlie (Admin) | `GET /api/auth/dashboard` | `200 OK` - Full dashboard |
+
+---
+
+## Policy 測試策略
+
+Policy 的集中定義讓**單元測試**變得更容易：
+
+```csharp
+// 測試 Policy 定義（單元測試）
+[Test]
+public async Task ManagerOrAbove_AdminUser_ShouldSucceed()
+{
+    // Arrange
+    var user = CreateClaimsPrincipal(roles: new[] { "Admin" });
+    var authService = BuildAuthorizationService(ConfigureTestPolicies);
+
+    // Act
+    var result = await authService.AuthorizeAsync(user, "ManagerOrAbove");
+
+    // Assert
+    Assert.IsTrue(result.Succeeded);
+}
 ```
-PUT /api/auth/{alice_userId}/profile
-Authorization: Bearer {alice_token}
 
-"alice_new_username"
-```
-**預期結果：** `200 OK`
-
-**場景二：用戶嘗試更新別人的資料（應失敗）**
-
-1. 用戶 Alice 使用自己的 Token
-2. 發送請求（使用 Bob 的 userId）：
-```
-PUT /api/auth/{bob_userId}/profile
-Authorization: Bearer {alice_token}
-
-"hacked_username"
-```
-**預期結果：** `403 Forbidden`
-
-**場景三：Admin 更新任何人的資料（應成功）**
-
-```
-PUT /api/auth/{any_userId}/profile
-Authorization: Bearer {admin_token}
-
-"admin_changed_name"
-```
-**預期結果：** `200 OK`（因為 SameUserAuthorizationHandler 中 `isAdmin = true`）
+這種測試方式比測試整個 HTTP 請求更快速、更可靠。
 
 ---
 
 ## 最佳實踐
 
-**1. Requirement 只定義「什麼」，Handler 定義「怎麼做」**
+**1. 使用常數定義 Policy 名稱，避免拼寫錯誤**
 
 ```csharp
-// ✅ 好：Requirement 是純粹的資料容器或標記
-public class MinimumAgeRequirement : IAuthorizationRequirement
+public static class Policies
 {
-    public int MinimumAge { get; }
-    public MinimumAgeRequirement(int minimumAge) => MinimumAge = minimumAge;
+    public const string AuthenticatedUser = "AuthenticatedUser";
+    public const string ManagerOrAbove   = "ManagerOrAbove";
+    public const string AdminOnly        = "AdminOnly";
 }
 
-// Handler 中才有邏輯
-protected override Task HandleRequirementAsync(...)
-{
-    var birthYear = ...; // 從 Claims 取得
-    if (DateTime.Now.Year - birthYear >= requirement.MinimumAge)
-        context.Succeed(requirement);
-}
+[Authorize(Policy = Policies.AdminOnly)]
 ```
 
-**2. Handler 中不呼叫 `context.Fail()` 允許其他 Handler 繼續**
+**2. Policy 命名用業務語言，而非技術語言**
 
 ```csharp
-// ✅ 好：不呼叫 Fail，讓其他 Handler 有機會授權
-if (condition) context.Succeed(requirement);
-// return; ← 不 Fail
+// ✅ 好：反映業務需求
+options.AddPolicy("CanViewFinancialReports", ...);
+options.AddPolicy("CanApproveLeaveRequests", ...);
 
-// ❌ 慎用：呼叫 Fail 會立即中斷，忽略其他 Handler
-context.Fail();
+// ❌ 不好：技術性的，難以理解業務含義
+options.AddPolicy("RoleLevel2OrAbove", ...);
 ```
 
-**3. 複雜的授權邏輯應放在 Handler，而非 Controller**
+**3. 複雜 Policy 應有對應的單元測試**
 
 ```csharp
-// ❌ 不好：授權邏輯混在 Controller 裡
-public IActionResult UpdateProfile(Guid userId)
-{
-    var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
-    if (currentUserId != userId.ToString() && !User.IsInRole("Admin"))
-        return Forbid();
-    // ...
-}
-
-// ✅ 好：授權邏輯封裝在 Handler，Controller 只需一行
-public async Task<IActionResult> UpdateProfile(Guid userId)
-{
-    var result = await authorizationService.AuthorizeAsync(User, userId, new SameUserRequirement());
-    if (!result.Succeeded) return Forbid();
-    // ...
-}
+// 每個 Policy 都應該有測試覆蓋邊界條件
+[Test] public async Task ManagerOrAbove_ManagerUser_ShouldSucceed() { ... }
+[Test] public async Task ManagerOrAbove_UserRole_ShouldFail() { ... }
+[Test] public async Task ManagerOrAbove_NoRole_ShouldFail() { ... }
+[Test] public async Task ManagerOrAbove_AdminUser_ShouldSucceed() { ... }
 ```
 
-**4. Handler 要單一職責**
+**4. 在 Program.cs 集中定義，不要分散**
 
 ```csharp
-// ✅ 好：每個 Handler 只做一件事
-public class SameUserAuthorizationHandler
-    : AuthorizationHandler<SameUserRequirement, Guid> { ... }
+// ✅ 好：全部在 Program.cs 的 AddAuthorization() 中
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy(...);
+    options.AddPolicy(...);
+});
 
-public class OwnerOrAdminHandler
-    : AuthorizationHandler<EditResourceRequirement, BlogPost> { ... }
+// ❌ 不好：使用 Extension Method 分散定義，難以一覽全局
+builder.Services.AddUserPolicies();
+builder.Services.AddAdminPolicies();
 ```
 
 ---
 
 ## 常見問題
 
-### Q: `IAuthorizationService` 和 `[Authorize]` 特性有什麼差別？
+### Q: Policy 中的多個 Requirement 是 AND 還是 OR？
 
-| 特性 | `[Authorize]` 特性 | `IAuthorizationService` |
-|------|-------------------|------------------------|
-| 使用時機 | 請求進入前的靜態檢查 | 方法內部的動態檢查 |
-| 資源傳遞 | 無法傳遞資源 | 可傳遞任何資源物件 |
-| 適合場景 | 角色/Policy 全局控制 | 資源所有權、動態條件 |
-
-### Q: 為什麼 `SameUserRequirement` 是空的類別？
-
-`IAuthorizationRequirement` 只是一個標記介面，用來讓 ASP.NET Core 知道「這是一個授權要求」。授權邏輯全部在 Handler 中。若需要傳遞參數（如最低年齡、訂閱等級），可以在 Requirement 中加入屬性：
+**答：** 是 **AND**。Policy 中的所有 Requirement 都必須滿足，授權才會成功。若需要 OR 邏輯，應在單一 Handler 內部實現：
 
 ```csharp
-public class MinimumAgeRequirement : IAuthorizationRequirement
+// OR 邏輯：在 Handler 中實現
+protected override Task HandleRequirementAsync(...)
 {
-    public int MinimumAge { get; }
-    public MinimumAgeRequirement(int minimumAge) => MinimumAge = minimumAge;
+    if (conditionA || conditionB)  // OR 在這裡
+        context.Succeed(requirement);
 }
 ```
 
-### Q: 可以有多個 Handler 處理同一個 Requirement 嗎？
+### Q: `[Authorize(Roles = "Admin")]` 和 `[Authorize(Policy = "AdminOnly")]` 有什麼差別？
 
-**可以。** ASP.NET Core 會執行所有已註冊的相容 Handler。只要其中任一 Handler 呼叫 `context.Succeed()`，授權就成功（除非某個 Handler 呼叫了 `context.Fail()`）。
+功能相同，但 Policy 更靈活：
+- `Roles` 只能檢查角色，未來難以擴充
+- Policy 可以組合任意 Requirements，業務規則變化時只需修改 Program.cs
+
+**最佳實踐：** 複雜或可能變化的授權規則使用 Policy；簡單的角色檢查可以直接用 `Roles`。
+
+### Q: 可以同時使用多個 `[Authorize]` 特性（堆疊）嗎？
+
+**可以。** 堆疊的 `[Authorize]` 特性是 AND 邏輯：
+
+```csharp
+[Authorize(Policy = "ManagerOrAbove")]
+[Authorize(Policy = "AuthenticatedUser")]
+public IActionResult StackedPolicies() { ... }
+// 兩個 Policy 都必須通過
+```
+
+但通常可以直接在單一 Policy 中組合多個 Requirement，更清晰：
+
+```csharp
+options.AddPolicy("VerifiedManager", policy =>
+{
+    policy.RequireAuthenticatedUser();
+    policy.AddRequirements(new MinimumRoleLevelRequirement(RoleLevel.Manager));
+});
+```
 
 ---
 
@@ -426,22 +474,42 @@ public class MinimumAgeRequirement : IAuthorizationRequirement
 
 ⚠️ **重要注意事項：**
 
-1. **資源授權不能只依靠 URL** - 即使路由正確，也必須在 Handler 中驗證所有權
-2. **Handler 中使用 `ClaimTypes.NameIdentifier` 而非 Username** - ID 是不可變的，Username 可能改變
-3. **不要在 Token 中存儲敏感資訊** - 即使是 Claim，也不應包含密碼、信用卡等
+1. **定期審查 Policy 定義** - 隨著業務變化，Policy 的要求可能需要更新
+2. **Policy 的 Default Policy** - 可設置全局默認 Policy，確保所有端點都有基本保護
+   ```csharp
+   options.DefaultPolicy = new AuthorizationPolicyBuilder()
+       .RequireAuthenticatedUser()
+       .Build();
+   ```
+3. **FallbackPolicy** - 設置未標記 `[Authorize]` 的端點也需認證
+   ```csharp
+   options.FallbackPolicy = options.DefaultPolicy;
+   ```
 
 ---
 
-## 進階話題預告
+## 課程總結
 
-本分支涵蓋了 Claim-Based Authorization 和資源授權。後續分支將涵蓋：
-- 📋 基於 Policy 的授權（`10_policy_based_authorization`）- 將授權規則命名化、集中管理，讓 `[Authorize(Policy = "...")]` 封裝複雜的業務邏輯
+恭喜完成整個 JWT 認證授權系列！以下是完整的學習路徑：
+
+| 分支 | 主題 | 核心概念 |
+|------|------|---------|
+| 1 | 用戶註冊與登入 | BCrypt 密碼雜湊 |
+| 2 | 生成 JWT Token | JWT 結構、Claims、簽名 |
+| 3 | 連接資料庫 | EF Core、SQLServer |
+| 4 | Service 層重構 | 依賴注入、分層架構 |
+| 5 | 端點安全保護 | JWT Bearer Middleware、[Authorize] |
+| 6 | 基本角色授權 | ClaimTypes.Role、[Authorize(Roles)] |
+| 7 | 刷新令牌 | Refresh Token、Token 輪換 |
+| 8 | 深入角色授權 | 多重角色、角色管理 API |
+| 9 | Claim 授權 | IAuthorizationRequirement、Handler、資源授權 |
+| **10** | **Policy 授權** | **AddAuthorization、具名 Policy、組合規則** |
 
 ---
 
 ## 參考資源
 
-- [ASP.NET Core 基於資源的授權文檔](https://docs.microsoft.com/en-us/aspnet/core/security/authorization/resourcebased)
-- [ASP.NET Core 自定義授權策略文檔](https://docs.microsoft.com/en-us/aspnet/core/security/authorization/policies)
-- [IAuthorizationRequirement 介面](https://docs.microsoft.com/en-us/dotnet/api/microsoft.aspnetcore.authorization.iauthorizationrequirement)
-- [AuthorizationHandler<TRequirement> 文檔](https://docs.microsoft.com/en-us/dotnet/api/microsoft.aspnetcore.authorization.authorizationhandler-1)
+- [ASP.NET Core Policy-Based Authorization 文檔](https://docs.microsoft.com/en-us/aspnet/core/security/authorization/policies)
+- [AuthorizationOptions.AddPolicy 文檔](https://docs.microsoft.com/en-us/dotnet/api/microsoft.aspnetcore.authorization.authorizationoptions.addpolicy)
+- [ASP.NET Core 授權簡介](https://docs.microsoft.com/en-us/aspnet/core/security/authorization/introduction)
+- [OWASP 訪問控制速查表](https://cheatsheetseries.owasp.org/cheatsheets/Access_Control_Cheat_Sheet.html)
