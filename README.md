@@ -15,6 +15,19 @@
 
 ---
 
+## 本分支異動的檔案
+
+| 狀態 | 檔案 | 異動內容 |
+|------|------|---------|
+| 新增 | `Requirements/SameUserRequirement.cs` | 定義 `SameUserRequirement`（Marker Interface） |
+| 新增 | `Handlers/SameUserAuthorizationHandler.cs` | 實作資源授權邏輯（比對 userId，Admin 可跳過） |
+| 修改 | `Program.cs` | 註冊 `SameUserAuthorizationHandler` |
+| 修改 | `Services/IAuthService.cs` | 新增 `UpdateUsernameAsync` |
+| 修改 | `Services/AuthService.cs` | 實作 `UpdateUsernameAsync` |
+| 修改 | `Controllers/AuthController.cs` | 注入 `IAuthorizationService`；新增 `UpdateProfile` 端點 |
+
+---
+
 ## 第十二步：基於 Claim 的授權
 
 ### 靜態特性的根本限制
