@@ -16,6 +16,17 @@
 
 ---
 
+## 本分支異動的檔案
+
+| 狀態 | 檔案 | 異動內容 |
+|------|------|---------|
+| 新增 | `Requirements/MinimumRoleLevelAttribute.cs` | 同時實作 `Attribute`、`IAuthorizationRequirement`、`IAuthorizationRequirementData` |
+| 新增 | `Handlers/MinimumRoleLevelAttributeHandler.cs` | 處理 `MinimumRoleLevelAttribute` 的 Handler |
+| 修改 | `Program.cs` | 新增註冊 `MinimumRoleLevelAttributeHandler` |
+| 修改 | `Controllers/AuthController.cs` | 新增 `reports-v2`、`system-config-v2`、`strict-admin-v2` 端點 |
+
+---
+
 ## 第十四步：IAuthorizationRequirementData 自訂授權特性
 
 ### Branch 10 留下的問題：魔術字串
