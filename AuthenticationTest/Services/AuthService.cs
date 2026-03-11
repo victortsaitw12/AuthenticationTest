@@ -134,6 +134,17 @@ namespace AuthenticationTest.Services
             return user;
         }
 
+        public async Task<User?> UpdateUsernameAsync(Guid userId, string newUsername)
+        {
+            var user = await context.Users.FindAsync(userId);
+            if (user is null) return null;
+
+            user.Username = newUsername;
+            await context.SaveChangesAsync();
+
+            return user;
+        }
+
         private string CreateToken(User user)
         {
             var claims = new List<Claim>

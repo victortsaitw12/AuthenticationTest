@@ -1,60 +1,259 @@
-# JWT 認證系統教學 - 第八部分：基於角色的授權（Role-Based Authorization）
+# JWT 認證系統教學 - 第九部分：基於 Claim 的授權（Claim-Based Authorization）
 
 ## 專案概述
 
 本專案是一個針對初級 .NET 工程師的教學範例，展示如何在 ASP.NET Core Web API 中實現用戶認證系統。本分支重點講解如何：
 
-1. 深入理解 ASP.NET Core 中的角色（Role）授權機制
-2. 支援用戶擁有多重角色
-3. 使用 `[Authorize(Roles = "...")]` 特性進行細粒度端點保護
-4. 使用 `User.IsInRole()` 進行程式化角色檢查
-5. 實作管理用戶角色的 Admin API
+1. 理解 Claim 與 Role 的本質差別
+2. 建立自定義的 `IAuthorizationRequirement`
+3. 實作 `AuthorizationHandler<TRequirement, TResource>` 進行資源授權
+4. 使用 `IAuthorizationService` 進行程式化授權檢查
+5. 實現「用戶只能操作自己的資源」這類常見授權場景
 
 ---
 
-> **前置知識：** 請先完成前七個分支，特別是 `6_Add_Roles` 和 `7_Refresh_Token`，了解基本角色概念和完整的 JWT 認證流程。
+> **前置知識：** 請先完成前八個分支，了解基本認證流程和角色授權。
 
 ---
 
-## 第十一步：深入基於角色的授權
+## 第十二步：基於 Claim 的授權
 
-本步驟在前一分支的角色基礎上，實現更完整的角色管理系統，支援多重角色、程式化角色檢查和角色管理 API。
+本步驟介紹比角色授權更靈活的 **Claim-Based Authorization**，並通過實際範例說明何時應該使用它。
 
-### 角色授權的核心概念回顧
+### 角色授權的局限性
 
-在 ASP.NET Core 中，角色授權的完整流程：
+回顧 `8_role_based_authorization` 分支：
 
-```
-用戶登入
-   ↓
-AuthService.CreateToken() 將角色寫入 JWT Payload
-   ↓
-JWT Middleware 解析 Token，建立 ClaimsPrincipal
-   ↓
-[Authorize(Roles = "Admin")] 檢查 ClaimsPrincipal 中的 Role Claims
-   ↓
-允許或拒絕訪問
+```csharp
+// 角色授權：只能問「你是什麼角色？」
+[Authorize(Roles = "Admin")]
+public IActionResult AdminOnly() { ... }
 ```
 
-### 多重角色支援
-
-#### 問題：單一角色的限制
-
-在 `6_Add_Roles` 分支中，`User` 實體只有一個 `string Role` 欄位，這導致一個用戶只能擁有一個角色。現實系統中，用戶可能同時是 `Manager` 和 `Auditor`。
-
-#### 解決方案：逗號分隔的多重角色
-
-本分支使用逗號分隔字串儲存多重角色，無需修改資料庫結構：
+**無法用角色授權解決的問題：**
 
 ```
-User.Role = "Admin,Manager"
-User.Role = "User"
-User.Role = "Manager,Auditor"
+需求：「用戶只能修改自己的個人資料」
+
+[Authorize(Roles = "User")]  // ❌ 這無法阻止 User A 修改 User B 的資料
+public IActionResult UpdateProfile(Guid userId) { ... }
 ```
 
-#### 更新 CreateToken() - 生成多重 Role Claims
+這類問題需要**資源授權（Resource Authorization）**：授權決策不只取決於用戶是誰，還取決於**操作的對象（資源）**。
 
-修改 `Services/AuthService.cs` 的 `CreateToken()` 方法：
+### Claim 是什麼？
+
+Claim（聲明）是 JWT 中的鍵值對，描述用戶的屬性：
+
+```json
+{
+  "http://schemas.xmlsoap.org/2003/05/identity/claims/name": "alice",
+  "http://schemas.xmlsoap.org/2003/05/identity/claims/nameidentifier": "3fa85f64...",
+  "http://schemas.microsoft.com/ws/2008/06/identity/claims/role": "Admin"
+}
+```
+
+**角色（Role）本質上也是一種 Claim：**
+```
+ClaimTypes.Role = "http://schemas.microsoft.com/ws/2008/06/identity/claims/role"
+```
+
+**Claim vs Role 的差別：**
+
+| 特性 | Role | Claim |
+|------|------|-------|
+| 粒度 | 粗粒度（身份標籤） | 細粒度（任何屬性） |
+| 用途 | 功能訪問控制 | 資源所有權、屬性匹配 |
+| 範例 | "Admin", "Manager" | userId, department, email |
+| 靈活性 | 低 | 高 |
+
+### ASP.NET Core 授權架構
+
+```
+[Authorize] 特性
+    ↓
+AuthorizationMiddleware
+    ↓
+IAuthorizationService.AuthorizeAsync()
+    ↓
+IAuthorizationHandler（可以有多個）
+    ↓
+AuthorizationHandlerContext（包含 User + Resource + Requirement）
+    ↓
+context.Succeed() / context.Fail()
+```
+
+**三個核心介面：**
+
+1. **`IAuthorizationRequirement`** - 定義授權的**要求**（What to check）
+2. **`AuthorizationHandler<TRequirement>`** - 實現授權的**邏輯**（How to check）
+3. **`IAuthorizationService`** - 執行授權的**服務**（Who runs the check）
+
+### 實作 SameUserRequirement
+
+#### Step 1：定義 Requirement
+
+`Requirements/SameUserRequirement.cs`:
+
+```csharp
+using Microsoft.AspNetCore.Authorization;
+
+namespace AuthenticationTest.Requirements
+{
+    /// <summary>
+    /// 要求：只有資源擁有者本人（或 Admin）才能執行此操作
+    /// </summary>
+    public class SameUserRequirement : IAuthorizationRequirement { }
+}
+```
+
+> **重點：** `IAuthorizationRequirement` 只是一個標記介面（Marker Interface），本身不包含邏輯。邏輯在 Handler 中實現。
+
+#### Step 2：實作 Handler
+
+`Handlers/SameUserAuthorizationHandler.cs`:
+
+```csharp
+using AuthenticationTest.Requirements;
+using Microsoft.AspNetCore.Authorization;
+using System.Security.Claims;
+
+namespace AuthenticationTest.Handlers
+{
+    /// <summary>
+    /// 處理 SameUserRequirement：
+    /// 允許條件：操作者是資源擁有者本人，或操作者是 Admin
+    /// </summary>
+    public class SameUserAuthorizationHandler
+        : AuthorizationHandler<SameUserRequirement, Guid>
+    {
+        protected override Task HandleRequirementAsync(
+            AuthorizationHandlerContext context,
+            SameUserRequirement requirement,
+            Guid resourceUserId)           // ← resource 就是我們傳入的 userId
+        {
+            // 從 JWT Claims 取出目前登入用戶的 ID
+            var currentUserId = context.User.FindFirstValue(ClaimTypes.NameIdentifier);
+
+            // 條件一：操作的用戶 ID 等於資源擁有者的 ID（同一個人）
+            var isSameUser = currentUserId == resourceUserId.ToString();
+
+            // 條件二：操作者是 Admin，有權代替任何人操作
+            var isAdmin = context.User.IsInRole("Admin");
+
+            if (isSameUser || isAdmin)
+            {
+                context.Succeed(requirement);  // ✅ 授權成功
+            }
+            // 注意：不呼叫 context.Fail()，讓其他 Handler 有機會處理
+
+            return Task.CompletedTask;
+        }
+    }
+}
+```
+
+**Handler 泛型參數解析：**
+
+```csharp
+AuthorizationHandler<SameUserRequirement, Guid>
+//                   ↑ Requirement 型別    ↑ Resource 型別
+```
+
+- `TRequirement`：這個 Handler 處理哪種 Requirement
+- `TResource`：資源的型別（這裡是 `Guid`，代表用戶的 ID）
+
+#### Step 3：在 Program.cs 註冊 Handler
+
+```csharp
+// 必須將 Handler 註冊到 DI 容器，ASP.NET Core 才能自動找到並執行它
+builder.Services.AddScoped<IAuthorizationHandler, SameUserAuthorizationHandler>();
+```
+
+> **為什麼需要手動註冊？** 不同於 `[Authorize(Roles = "...")]`，自定義 Handler 不是框架內建的，需要顯式告訴 DI 容器它的存在。
+
+#### Step 4：在 Controller 中使用 IAuthorizationService
+
+```csharp
+[Authorize]
+[HttpPut("{userId:guid}/profile")]
+public async Task<IActionResult> UpdateProfile(Guid userId, [FromBody] string newUsername)
+{
+    // 程式化授權：將資源（userId）傳給 Handler 進行判斷
+    var authResult = await authorizationService.AuthorizeAsync(
+        User,                      // ClaimsPrincipal（目前登入的用戶）
+        userId,                    // Resource（操作的目標用戶 ID）
+        new SameUserRequirement()  // Requirement（要滿足的條件）
+    );
+
+    if (!authResult.Succeeded)
+    {
+        return Forbid();  // 403 Forbidden
+    }
+
+    // 授權成功，執行更新邏輯
+    var user = await authService.UpdateUsernameAsync(userId, newUsername);
+    if (user is null) return NotFound("User not found.");
+
+    return Ok(user);
+}
+```
+
+**`IAuthorizationService` 如何注入？**
+
+在 Controller 建構子中加入注入：
+```csharp
+public class AuthController(
+    IAuthService authService,
+    IAuthorizationService authorizationService  // ← 新增注入
+) : ControllerBase
+```
+
+`IAuthorizationService` 是 ASP.NET Core 內建服務，無需額外在 Program.cs 中註冊，`AddAuthorization()` 已自動完成。
+
+### 授權流程圖
+
+```
+PUT /api/auth/{userId}/profile
+
+[Authorize] 先確保用戶已登入
+   ↓
+進入 UpdateProfile 方法
+   ↓
+authorizationService.AuthorizeAsync(User, userId, SameUserRequirement)
+   ↓
+ASP.NET Core 找到所有處理 SameUserRequirement 的 Handler
+   ↓
+SameUserAuthorizationHandler.HandleRequirementAsync(context, requirement, userId)
+   ↓
+是否是同一個用戶 OR 是 Admin？
+   ├─ 是 → context.Succeed() → authResult.Succeeded = true → 繼續執行
+   └─ 否 → 不呼叫 Succeed → authResult.Succeeded = false → 403 Forbidden
+```
+
+### Claim 的讀取方式
+
+從 `context.User`（即 `ClaimsPrincipal`）讀取各種 Claim：
+
+```csharp
+// 讀取單個 Claim 值
+string? name = context.User.FindFirstValue(ClaimTypes.Name);
+string? userId = context.User.FindFirstValue(ClaimTypes.NameIdentifier);
+
+// 讀取所有同類型的 Claim（例如多重角色）
+var roles = context.User.FindAll(ClaimTypes.Role).Select(c => c.Value);
+
+// 自定義 Claim（直接使用字串 Key）
+string? department = context.User.FindFirstValue("department");
+
+// 使用 HasClaim 檢查是否有某個 Claim
+bool hasEmailClaim = context.User.HasClaim(c => c.Type == ClaimTypes.Email);
+bool isVerified = context.User.HasClaim("is_verified", "true");
+```
+
+### 在 JWT 中添加自定義 Claim
+
+若要讓 Token 攜帶自定義 Claim，在 `CreateToken()` 中添加：
 
 ```csharp
 private string CreateToken(User user)
@@ -62,239 +261,28 @@ private string CreateToken(User user)
     var claims = new List<Claim>
     {
         new Claim(ClaimTypes.Name, user.Username),
-        new Claim(ClaimTypes.NameIdentifier, user.Id.ToString())
+        new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()),
+
+        // 標準 Claim
+        // new Claim(ClaimTypes.Email, user.Email),
+
+        // 自定義 Claim（使用自定義字串 Key）
+        // new Claim("department", user.Department),
+        // new Claim("subscription_type", user.SubscriptionType),
     };
 
-    // ✅ 新增：支援多重角色 - 將逗號分隔的角色字串轉換為多個 Role Claims
-    var roles = user.Role.Split(',', StringSplitOptions.RemoveEmptyEntries)
-                     .Select(r => r.Trim())
-                     .Where(r => !string.IsNullOrEmpty(r));
-    foreach (var role in roles)
-    {
-        claims.Add(new Claim(ClaimTypes.Role, role));
-    }
-
-    // ... 其餘 Token 建立邏輯不變
+    // ... 其餘不變
 }
 ```
 
-**為什麼要為每個角色建立獨立的 Claim？**
-
-`[Authorize(Roles = "Admin")]` 在底層是這樣運作的：
-```csharp
-// ASP.NET Core 內部實現（簡化）
-bool hasRole = claimsPrincipal.Claims
-    .Where(c => c.Type == ClaimTypes.Role)
-    .Any(c => c.Value == "Admin");
-```
-
-因此，每個角色需要是一個獨立的 `ClaimTypes.Role` 聲明。如果只存一個 `"Admin,Manager"` 字串，`[Authorize(Roles = "Admin")]` 會失敗，因為它找不到值等於 `"Admin"` 的 Claim。
-
-**JWT Payload 範例：**
-```json
-{
-  "http://schemas.xmlsoap.org/2003/05/identity/claims/name": "alice",
-  "http://schemas.xmlsoap.org/2003/05/identity/claims/nameidentifier": "...",
-  "http://schemas.microsoft.com/ws/2008/06/identity/claims/role": ["Admin", "Manager"],
-  "iss": "MyApp",
-  "aud": "MyAppUsers",
-  "exp": 1709941200
-}
-```
-
-### [Authorize(Roles = "...")] 特性深入解析
-
-#### 單一角色要求
+**自定義 Claim 的解析：**
 
 ```csharp
-// 只有 Admin 才能訪問
-[Authorize(Roles = "Admin")]
-[HttpGet("admin-only")]
-public IActionResult AdminOnlyEndpoint()
+// 在 Handler 中讀取自定義 Claim
+var department = context.User.FindFirstValue("department");
+if (department == "Finance")
 {
-    return Ok("You are an Admin.");
-}
-```
-
-#### 多重角色（OR 邏輯）
-
-```csharp
-// Admin 或 Manager 皆可訪問（逗號代表 OR）
-[Authorize(Roles = "Admin,Manager")]
-[HttpGet("management")]
-public IActionResult ManagementEndpoint()
-{
-    return Ok("You are an Admin or Manager.");
-}
-```
-
-> **⚠️ 重要：** 逗號在 `Roles` 屬性中代表 **OR**（任一角色即可），而非 AND（同時擁有所有角色）。
-
-#### 多重角色（AND 邏輯）
-
-如需要求用戶**同時**擁有多個角色，需要堆疊多個 `[Authorize]` 特性：
-
-```csharp
-// 必須同時擁有 Admin 和 Auditor 角色
-[Authorize(Roles = "Admin")]
-[Authorize(Roles = "Auditor")]
-[HttpGet("admin-audit")]
-public IActionResult AdminAuditEndpoint()
-{
-    return Ok("You are both Admin and Auditor.");
-}
-```
-
-### 程式化角色檢查 - User.IsInRole()
-
-有時你需要在方法內部根據角色執行不同邏輯，而不是直接拒絕訪問：
-
-```csharp
-[Authorize(Roles = "Admin,Manager")]
-[HttpGet("management")]
-public IActionResult ManagementEndpoint()
-{
-    // 根據角色返回不同內容
-    var message = User.IsInRole("Admin")
-        ? "You are an Admin accessing management."
-        : "You are a Manager accessing management.";
-
-    return Ok(message);
-}
-```
-
-**`User` 物件來自哪裡？**
-
-`User` 是 `ControllerBase` 基底類別的屬性，型別是 `ClaimsPrincipal`，由 JWT Middleware 在請求處理前自動建立：
-
-```csharp
-// ASP.NET Core 內部（簡化）
-public ClaimsPrincipal User => HttpContext.User;
-```
-
-**可用的 User 輔助方法：**
-
-```csharp
-// 檢查是否有某個角色
-bool isAdmin = User.IsInRole("Admin");
-
-// 取得特定 Claim 的值
-string? username = User.FindFirstValue(ClaimTypes.Name);
-string? userId   = User.FindFirstValue(ClaimTypes.NameIdentifier);
-
-// 取得所有角色
-var roles = User.FindAll(ClaimTypes.Role).Select(c => c.Value).ToList();
-
-// 檢查是否已認證
-bool isAuthenticated = User.Identity?.IsAuthenticated ?? false;
-```
-
-### 個人資料端點 - 查看自己的角色
-
-```csharp
-[Authorize]
-[HttpGet("profile")]
-public IActionResult GetProfile()
-{
-    var username = User.FindFirstValue(ClaimTypes.Name);
-    var userId   = User.FindFirstValue(ClaimTypes.NameIdentifier);
-    var roles    = User.FindAll(ClaimTypes.Role).Select(c => c.Value).ToList();
-
-    return Ok(new
-    {
-        Username = username,
-        UserId   = userId,
-        Roles    = roles
-    });
-}
-```
-
-**回應範例：**
-```json
-{
-  "username": "alice",
-  "userId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-  "roles": ["Admin", "Manager"]
-}
-```
-
-### 角色管理 API
-
-#### 授予角色
-
-```csharp
-// Admin 才能授予角色
-[Authorize(Roles = "Admin")]
-[HttpPut("{userId:guid}/grant-role")]
-public async Task<ActionResult<User>> GrantRole(Guid userId, [FromBody] string role)
-{
-    var user = await authService.GrantRoleAsync(userId, role);
-    if (user is null)
-    {
-        return NotFound("User not found.");
-    }
-    return Ok(user);
-}
-```
-
-#### 撤銷角色
-
-```csharp
-// Admin 才能撤銷角色
-[Authorize(Roles = "Admin")]
-[HttpDelete("{userId:guid}/revoke-role/{role}")]
-public async Task<ActionResult<User>> RevokeRole(Guid userId, string role)
-{
-    var user = await authService.RevokeRoleAsync(userId, role);
-    if (user is null)
-    {
-        return NotFound("User not found.");
-    }
-    return Ok(user);
-}
-```
-
-#### Service 層實作
-
-`Services/AuthService.cs` 中的 `GrantRoleAsync` 和 `RevokeRoleAsync`：
-
-```csharp
-public async Task<User?> GrantRoleAsync(Guid userId, string role)
-{
-    var user = await context.Users.FindAsync(userId);
-    if (user is null) return null;
-
-    // 解析現有角色（逗號分隔）
-    var roles = user.Role.Split(',', StringSplitOptions.RemoveEmptyEntries)
-                     .Select(r => r.Trim())
-                     .ToList();
-
-    // 避免重複新增角色（不區分大小寫）
-    if (!roles.Contains(role, StringComparer.OrdinalIgnoreCase))
-    {
-        roles.Add(role);
-        user.Role = string.Join(",", roles);
-        await context.SaveChangesAsync();
-    }
-
-    return user;
-}
-
-public async Task<User?> RevokeRoleAsync(Guid userId, string role)
-{
-    var user = await context.Users.FindAsync(userId);
-    if (user is null) return null;
-
-    // 過濾掉要撤銷的角色
-    var roles = user.Role.Split(',', StringSplitOptions.RemoveEmptyEntries)
-                     .Select(r => r.Trim())
-                     .Where(r => !r.Equals(role, StringComparison.OrdinalIgnoreCase))
-                     .ToList();
-
-    user.Role = string.Join(",", roles);
-    await context.SaveChangesAsync();
-
-    return user;
+    context.Succeed(requirement);
 }
 ```
 
@@ -302,160 +290,135 @@ public async Task<User?> RevokeRoleAsync(Guid userId, string role)
 
 ## 測試 API 端點
 
-### 完整測試流程
+### 測試「用戶只能更新自己的資料」
 
-**第一步：以 Admin 身份登入**
+**場景一：用戶更新自己的資料（應成功）**
 
-確保資料庫中有一個 `Role = "Admin"` 的用戶（可透過直接修改資料庫，或使用 grant-role API 授予）。
-
-```json
-POST /api/auth/login
-{
-  "username": "admin",
-  "password": "AdminPassword123!"
-}
+1. 用戶 Alice 登入，取得 Token（Token 中含有 Alice 的 userId）
+2. 發送請求：
 ```
+PUT /api/auth/{alice_userId}/profile
+Authorization: Bearer {alice_token}
 
-**第二步：測試 Admin 專屬端點**
-
-在 Scalar UI 中設置 Authorization Header 後：
-
+"alice_new_username"
 ```
-GET /api/auth/admin-only
+**預期結果：** `200 OK`
+
+**場景二：用戶嘗試更新別人的資料（應失敗）**
+
+1. 用戶 Alice 使用自己的 Token
+2. 發送請求（使用 Bob 的 userId）：
 ```
+PUT /api/auth/{bob_userId}/profile
+Authorization: Bearer {alice_token}
 
-**預期結果：** `200 OK - "You are an Admin."`
-
-**第三步：測試 Management 端點**
-
+"hacked_username"
 ```
-GET /api/auth/management
-```
-
-**預期結果：** `200 OK - "You are an Admin accessing management."`
-
-**第四步：查看個人資料**
-
-```
-GET /api/auth/profile
-```
-
-**預期結果：**
-```json
-{
-  "username": "admin",
-  "userId": "...",
-  "roles": ["Admin"]
-}
-```
-
-**第五步：授予另一個用戶 Manager 角色**
-
-先取得另一個用戶的 ID（可從 register 回應中取得），然後：
-
-```json
-PUT /api/auth/{userId}/grant-role
-Authorization: Bearer {admin_token}
-Content-Type: application/json
-
-"Manager"
-```
-
-**第六步：以更新後的用戶重新登入，驗證多重角色**
-
-用授予了 `"Admin,Manager"` 的用戶登入後測試：
-- `GET /api/auth/admin-only` - 應成功
-- `GET /api/auth/management` - 應成功
-- `GET /api/auth/profile` 中的 roles 應顯示 `["Admin", "Manager"]`
-
-### 授權失敗測試
-
-使用無角色用戶的 Token 嘗試訪問 Admin 端點：
-
-```
-GET /api/auth/admin-only
-Authorization: Bearer {regular_user_token}
-```
-
 **預期結果：** `403 Forbidden`
 
-> **注意：** 401 和 403 的區別：
-> - `401 Unauthorized`：用戶**未認證**（沒有 Token 或 Token 無效）
-> - `403 Forbidden`：用戶已認證，但**沒有權限**（角色不符）
+**場景三：Admin 更新任何人的資料（應成功）**
+
+```
+PUT /api/auth/{any_userId}/profile
+Authorization: Bearer {admin_token}
+
+"admin_changed_name"
+```
+**預期結果：** `200 OK`（因為 SameUserAuthorizationHandler 中 `isAdmin = true`）
 
 ---
 
-## 角色授權的最佳實踐
+## 最佳實踐
 
-**1. 使用常數定義角色名稱，避免魔術字串**
+**1. Requirement 只定義「什麼」，Handler 定義「怎麼做」**
+
 ```csharp
-public static class Roles
+// ✅ 好：Requirement 是純粹的資料容器或標記
+public class MinimumAgeRequirement : IAuthorizationRequirement
 {
-    public const string Admin   = "Admin";
-    public const string Manager = "Manager";
-    public const string User    = "User";
+    public int MinimumAge { get; }
+    public MinimumAgeRequirement(int minimumAge) => MinimumAge = minimumAge;
 }
 
-[Authorize(Roles = Roles.Admin)]
-```
-
-**2. 角色命名採用 PascalCase，保持大小寫一致**
-```csharp
-// ✅ 好
-"Admin", "Manager", "User"
-
-// ❌ 不好
-"admin", "MANAGER", "User"
-```
-
-**3. 在 Service 層驗證角色名稱合法性**
-```csharp
-public async Task<User?> GrantRoleAsync(Guid userId, string role)
+// Handler 中才有邏輯
+protected override Task HandleRequirementAsync(...)
 {
-    var validRoles = new[] { Roles.Admin, Roles.Manager, Roles.User };
-    if (!validRoles.Contains(role)) return null;
+    var birthYear = ...; // 從 Claims 取得
+    if (DateTime.Now.Year - birthYear >= requirement.MinimumAge)
+        context.Succeed(requirement);
+}
+```
+
+**2. Handler 中不呼叫 `context.Fail()` 允許其他 Handler 繼續**
+
+```csharp
+// ✅ 好：不呼叫 Fail，讓其他 Handler 有機會授權
+if (condition) context.Succeed(requirement);
+// return; ← 不 Fail
+
+// ❌ 慎用：呼叫 Fail 會立即中斷，忽略其他 Handler
+context.Fail();
+```
+
+**3. 複雜的授權邏輯應放在 Handler，而非 Controller**
+
+```csharp
+// ❌ 不好：授權邏輯混在 Controller 裡
+public IActionResult UpdateProfile(Guid userId)
+{
+    var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+    if (currentUserId != userId.ToString() && !User.IsInRole("Admin"))
+        return Forbid();
+    // ...
+}
+
+// ✅ 好：授權邏輯封裝在 Handler，Controller 只需一行
+public async Task<IActionResult> UpdateProfile(Guid userId)
+{
+    var result = await authorizationService.AuthorizeAsync(User, userId, new SameUserRequirement());
+    if (!result.Succeeded) return Forbid();
     // ...
 }
 ```
 
-**4. 角色管理端點需嚴格限制**
-```csharp
-// ✅ 只有 Admin 才能管理角色
-[Authorize(Roles = Roles.Admin)]
-[HttpPut("{userId:guid}/grant-role")]
-```
+**4. Handler 要單一職責**
 
-**5. 記錄角色變更（稽核日誌）**
 ```csharp
-_logger.LogWarning("Role {Role} granted to user {UserId} by admin {AdminId}",
-    role, userId, User.FindFirstValue(ClaimTypes.NameIdentifier));
+// ✅ 好：每個 Handler 只做一件事
+public class SameUserAuthorizationHandler
+    : AuthorizationHandler<SameUserRequirement, Guid> { ... }
+
+public class OwnerOrAdminHandler
+    : AuthorizationHandler<EditResourceRequirement, BlogPost> { ... }
 ```
 
 ---
 
 ## 常見問題
 
-### Q: `[Authorize(Roles = "Admin,Manager")]` 中逗號是 OR 還是 AND？
+### Q: `IAuthorizationService` 和 `[Authorize]` 特性有什麼差別？
 
-**答：** 是 **OR**。任一角色都可以訪問。要實現 AND 邏輯，需堆疊多個 `[Authorize]` 特性：
+| 特性 | `[Authorize]` 特性 | `IAuthorizationService` |
+|------|-------------------|------------------------|
+| 使用時機 | 請求進入前的靜態檢查 | 方法內部的動態檢查 |
+| 資源傳遞 | 無法傳遞資源 | 可傳遞任何資源物件 |
+| 適合場景 | 角色/Policy 全局控制 | 資源所有權、動態條件 |
+
+### Q: 為什麼 `SameUserRequirement` 是空的類別？
+
+`IAuthorizationRequirement` 只是一個標記介面，用來讓 ASP.NET Core 知道「這是一個授權要求」。授權邏輯全部在 Handler 中。若需要傳遞參數（如最低年齡、訂閱等級），可以在 Requirement 中加入屬性：
+
 ```csharp
-[Authorize(Roles = "Admin")]
-[Authorize(Roles = "Auditor")]  // 同時需要 Admin 和 Auditor
+public class MinimumAgeRequirement : IAuthorizationRequirement
+{
+    public int MinimumAge { get; }
+    public MinimumAgeRequirement(int minimumAge) => MinimumAge = minimumAge;
+}
 ```
 
-### Q: `User.IsInRole()` 和 `[Authorize(Roles = "...")]` 的差別？
+### Q: 可以有多個 Handler 處理同一個 Requirement 嗎？
 
-**答：** 功能上相同，都是檢查 JWT Claims 中的 Role。`[Authorize]` 用於請求進入前就拒絕存取，`User.IsInRole()` 用於方法內部根據角色執行不同邏輯。
-
-### Q: 用戶更換角色後，舊的 Token 仍然有效嗎？
-
-**答：** 是的。JWT 是**無狀態**的，Token 生成後就固定了。若需立即生效，可以縮短 Token 有效期（如 15 分鐘）讓用戶重新登入，或實作 Token 黑名單機制。
-
-### Q: 角色授權的缺點是什麼？
-
-**答：** 角色授權是**粗粒度**的。例如「用戶只能編輯自己的文章」這類需求，用角色很難表達。這時需要更精細的授權機制，例如：
-- 基於 Claim 的授權（下一分支：`9_claim_based_authorization`）
-- 基於 Policy 的授權（`10_policy_based_authorization`）
+**可以。** ASP.NET Core 會執行所有已註冊的相容 Handler。只要其中任一 Handler 呼叫 `context.Succeed()`，授權就成功（除非某個 Handler 呼叫了 `context.Fail()`）。
 
 ---
 
@@ -463,23 +426,22 @@ _logger.LogWarning("Role {Role} granted to user {UserId} by admin {AdminId}",
 
 ⚠️ **重要注意事項：**
 
-1. **防止角色升級攻擊** - 角色管理端點必須嚴格限制，只有 Admin 才能修改角色
-2. **最小權限原則** - 用戶只應擁有完成工作所需的最少角色
-3. **避免角色爆炸** - 避免創建過多細粒度角色，改用 Policy 或 Claim 授權
-4. **Token 失效問題** - 角色變更後舊 Token 仍有效，需配合短期 Token + Refresh Token 機制
+1. **資源授權不能只依靠 URL** - 即使路由正確，也必須在 Handler 中驗證所有權
+2. **Handler 中使用 `ClaimTypes.NameIdentifier` 而非 Username** - ID 是不可變的，Username 可能改變
+3. **不要在 Token 中存儲敏感資訊** - 即使是 Claim，也不應包含密碼、信用卡等
 
 ---
 
 ## 進階話題預告
 
-本分支涵蓋了基於角色的授權深度應用。後續分支將涵蓋：
-- 🎯 基於 Claim 的授權（`9_claim_based_authorization`）- 使用自定義 Claim 和 `IAuthorizationRequirement` 實現細粒度授權
-- 📋 基於 Policy 的授權（`10_policy_based_authorization`）- 定義可重用的授權策略
+本分支涵蓋了 Claim-Based Authorization 和資源授權。後續分支將涵蓋：
+- 📋 基於 Policy 的授權（`10_policy_based_authorization`）- 將授權規則命名化、集中管理，讓 `[Authorize(Policy = "...")]` 封裝複雜的業務邏輯
 
 ---
 
 ## 參考資源
 
-- [ASP.NET Core 角色授權文檔](https://docs.microsoft.com/en-us/aspnet/core/security/authorization/roles)
-- [ClaimsPrincipal 文檔](https://docs.microsoft.com/en-us/dotnet/api/system.security.claims.claimsprincipal)
-- [OWASP 訪問控制速查表](https://cheatsheetseries.owasp.org/cheatsheets/Access_Control_Cheat_Sheet.html)
+- [ASP.NET Core 基於資源的授權文檔](https://docs.microsoft.com/en-us/aspnet/core/security/authorization/resourcebased)
+- [ASP.NET Core 自定義授權策略文檔](https://docs.microsoft.com/en-us/aspnet/core/security/authorization/policies)
+- [IAuthorizationRequirement 介面](https://docs.microsoft.com/en-us/dotnet/api/microsoft.aspnetcore.authorization.iauthorizationrequirement)
+- [AuthorizationHandler<TRequirement> 文檔](https://docs.microsoft.com/en-us/dotnet/api/microsoft.aspnetcore.authorization.authorizationhandler-1)

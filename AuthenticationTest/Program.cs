@@ -1,5 +1,8 @@
 using AuthenticationTest.Data;
+using AuthenticationTest.Handlers;
+using AuthenticationTest.Requirements;
 using AuthenticationTest.Services;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
@@ -34,6 +37,9 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     });
 
 builder.Services.AddScoped<IAuthService, AuthService>();
+
+// 註冊 Claim-Based Authorization Handler
+builder.Services.AddScoped<IAuthorizationHandler, SameUserAuthorizationHandler>();
 
 var app = builder.Build();
 

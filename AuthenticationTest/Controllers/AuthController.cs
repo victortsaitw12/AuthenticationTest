@@ -1,5 +1,6 @@
 using AuthenticationTest.Entities;
 using AuthenticationTest.Models;
+using AuthenticationTest.Requirements;
 using AuthenticationTest.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -9,7 +10,7 @@ namespace AuthenticationTest.Controllers
 {
     [Route("api/[controller]")]
     [ApiController]
-    public class AuthController(IAuthService authService) : ControllerBase
+    public class AuthController(IAuthService authService, IAuthorizationService authorizationService) : ControllerBase
     {
         [HttpPost("register")]
         public async Task<ActionResult<User>> Register(UserDto request)
@@ -49,7 +50,6 @@ namespace AuthenticationTest.Controllers
             return Ok(result);
         }
 
-        // 任何已認證用戶皆可訪問
         [Authorize]
         [HttpGet]
         public IActionResult AuthenticatedOnlyEndpoint()
@@ -57,7 +57,6 @@ namespace AuthenticationTest.Controllers
             return Ok("You are authenticated.");
         }
 
-        // 只有 Admin 可以訪問
         [Authorize(Roles = "Admin")]
         [HttpGet("admin-only")]
         public IActionResult AdminOnlyEndpoint()
@@ -65,12 +64,10 @@ namespace AuthenticationTest.Controllers
             return Ok("You are an Admin.");
         }
 
-        // Admin 或 Manager 皆可訪問（逗號代表 OR 邏輯）
         [Authorize(Roles = "Admin,Manager")]
         [HttpGet("management")]
         public IActionResult ManagementEndpoint()
         {
-            // 使用 User.IsInRole() 進行程式化角色檢查
             var message = User.IsInRole("Admin")
                 ? "You are an Admin accessing management."
                 : "You are a Manager accessing management.";
@@ -78,7 +75,6 @@ namespace AuthenticationTest.Controllers
             return Ok(message);
         }
 
-        // 用戶個人資料端點：顯示目前登入用戶的角色資訊
         [Authorize]
         [HttpGet("profile")]
         public IActionResult GetProfile()
@@ -87,37 +83,53 @@ namespace AuthenticationTest.Controllers
             var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
             var roles = User.FindAll(ClaimTypes.Role).Select(c => c.Value).ToList();
 
-            return Ok(new
-            {
-                Username = username,
-                UserId = userId,
-                Roles = roles
-            });
+            return Ok(new { Username = username, UserId = userId, Roles = roles });
         }
 
-        // Admin 才能授予角色
         [Authorize(Roles = "Admin")]
         [HttpPut("{userId:guid}/grant-role")]
         public async Task<ActionResult<User>> GrantRole(Guid userId, [FromBody] string role)
         {
             var user = await authService.GrantRoleAsync(userId, role);
-            if (user is null)
-            {
-                return NotFound("User not found.");
-            }
+            if (user is null) return NotFound("User not found.");
             return Ok(user);
         }
 
-        // Admin 才能撤銷角色
         [Authorize(Roles = "Admin")]
         [HttpDelete("{userId:guid}/revoke-role/{role}")]
         public async Task<ActionResult<User>> RevokeRole(Guid userId, string role)
         {
             var user = await authService.RevokeRoleAsync(userId, role);
-            if (user is null)
+            if (user is null) return NotFound("User not found.");
+            return Ok(user);
+        }
+
+        // ── Claim-Based Authorization 示範端點 ──────────────────────────────
+
+        /// <summary>
+        /// 用戶只能更新自己的資料，Admin 可以更新任何人的資料。
+        /// 使用 IAuthorizationService 進行程式化 Claim-Based 授權檢查。
+        /// </summary>
+        [Authorize]
+        [HttpPut("{userId:guid}/profile")]
+        public async Task<IActionResult> UpdateProfile(Guid userId, [FromBody] string newUsername)
+        {
+            // 使用 IAuthorizationService 進行資源授權：
+            // 傳入 resource = userId，讓 Handler 決定此用戶是否有權限操作
+            var authResult = await authorizationService.AuthorizeAsync(
+                User,
+                userId,
+                new SameUserRequirement());
+
+            if (!authResult.Succeeded)
             {
-                return NotFound("User not found.");
+                return Forbid();
             }
+
+            // 授權成功，執行更新邏輯
+            var user = await authService.UpdateUsernameAsync(userId, newUsername);
+            if (user is null) return NotFound("User not found.");
+
             return Ok(user);
         }
     }

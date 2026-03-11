@@ -10,5 +10,6 @@ namespace AuthenticationTest.Services
         Task<TokenResponseDto?> RefreshTokenAsync(RefreshTokenRequestDto request);
         Task<User?> GrantRoleAsync(Guid userId, string role);
         Task<User?> RevokeRoleAsync(Guid userId, string role);
+        Task<User?> UpdateUsernameAsync(Guid userId, string newUsername);
     }
 }
