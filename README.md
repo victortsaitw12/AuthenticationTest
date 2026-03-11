@@ -4,217 +4,104 @@
 
 本專案是一個針對初級 .NET 工程師的教學範例，展示如何在 ASP.NET Core Web API 中實現用戶認證系統。本分支重點講解如何：
 
-1. 理解 Policy-Based Authorization 的架構和優勢
-2. 使用 `AddAuthorization()` 定義具名授權策略
-3. 在 Policy 中組合多個 Requirement（AND 邏輯）
-4. 使用 `[Authorize(Policy = "...")]` 保護端點
-5. 使用 `IAuthorizationService` 進行程式化 Policy 評估
+1. 理解 Policy-Based Authorization 解決「規則散落各地」的問題
+2. 在 `AddAuthorization()` 中**集中定義**具名授權策略
+3. 在 Policy 中**組合多個 Requirement**（AND 邏輯）
+4. 使用 `FallbackPolicy` 讓整個應用預設受保護
+5. 使用 `[AllowAnonymous]` 明確豁免公開端點
 
 ---
 
-> **前置知識：** 請先完成前九個分支，特別是 `9_claim_based_authorization`，了解 `IAuthorizationRequirement` 和 `IAuthorizationHandler` 的工作原理。
+> **前置知識：** 請先完成 `9_claim_based_authorization`，了解 `IAuthorizationRequirement` 和 `IAuthorizationHandler` 的工作原理。本分支是在那個基礎上，新增「把規則命名化、集中管理」的能力。
 
 ---
 
 ## 第十三步：基於 Policy 的授權
 
-本步驟介紹 ASP.NET Core 中最靈活、最推薦的授權方式——**Policy-Based Authorization**。它將授權規則集中定義、命名，讓程式碼更清晰、更易於維護和測試。
+### Branch 9 留下的問題
 
-### 為什麼需要 Policy-Based Authorization？
-
-#### 問題：魔術字串到處散落
-
-在前兩個分支中，授權規則分散在各個 Controller 中：
+Branch 9 教會了我們如何寫 Requirement 和 Handler，但**在哪裡使用這些規則**仍然分散：
 
 ```csharp
-// 同樣的「需要是 Admin 或 Manager」邏輯，出現在多個地方
-[Authorize(Roles = "Admin,Manager")]  // UserController
-[Authorize(Roles = "Admin,Manager")]  // ProductController
-[Authorize(Roles = "Admin,Manager")]  // OrderController
+// Branch 9 的做法：每次都要 new 一個 Requirement，條件直接寫在 Controller 裡
+var result = await authorizationService.AuthorizeAsync(
+    User, userId, new SameUserRequirement());
+
+// 更早的做法：規則直接寫在特性裡
+[Authorize(Roles = "Admin,Manager")]
+[Authorize(Roles = "Admin,Manager")]  // 在另一個 Controller 重複一遍
 ```
 
-**問題：**
-1. 規則分散，難以維護
-2. 如果需要修改條件（例如加入 `Director` 角色），需要找到所有地方修改
-3. 無法組合複雜邏輯（例如「Manager 且年齡 >= 25」）
-4. 難以測試
+**這帶來幾個問題：**
 
-#### 解決方案：Policy 集中定義
+| 問題 | 描述 |
+|------|------|
+| 規則散落 | 「Manager 以上」這個條件，散落在 10 個 Controller 的特性上 |
+| 修改麻煩 | 條件一改（例如加入 Director 角色），要找到所有地方修改 |
+| 無法組合 | `[Authorize(Roles)]` 只能做簡單的角色比對，無法把多個 Requirement 組在一起 |
+| 難以測試 | 規則和 Controller 耦合，不易單獨測試 |
+
+### Policy-Based Authorization 的核心思想
+
+**把「授權規則」從「使用規則的地方」分離出來**，集中定義在 `Program.cs`，給每條規則取一個名字，其他地方只寫名字。
+
+```
+Program.cs（集中定義）          Controller（只寫名字）
+─────────────────────           ─────────────────────
+"ManagerOrAbove"                [Authorize(Policy = "ManagerOrAbove")]
+  = MinimumRoleLevel(Manager)
+```
+
+---
+
+### 定義具名 Policy
+
+所有 Policy 在 `Program.cs` 的 `AddAuthorization()` 中集中定義：
 
 ```csharp
-// Program.cs - 集中定義，一處修改全部生效
 builder.Services.AddAuthorization(options =>
 {
-    options.AddPolicy("ManagerOrAbove", policy =>
-        policy.AddRequirements(new MinimumRoleLevelRequirement(RoleLevel.Manager)));
-});
-
-// Controller - 只需寫 Policy 名稱
-[Authorize(Policy = "ManagerOrAbove")]
-public IActionResult ManagePage() { ... }
-```
-
-### Policy 的組成
-
-一個 Policy 由一個或多個 **Requirement** 組成，所有 Requirement 必須**全部滿足**（AND 邏輯）才能授權成功：
-
-```
-Policy "StrictAdminOnly"
-├── RequireAuthenticatedUser()      ← 必須已登入
-├── RequireClaim(ClaimTypes.Name)   ← Token 必須包含 Name Claim
-└── MinimumRoleLevelRequirement(Admin) ← 必須是 Admin 等級
-    ↓ 全部通過 → 授權成功
-```
-
-### MinimumRoleLevelRequirement - 等級制授權
-
-#### Requirement 定義
-
-`Requirements/MinimumRoleLevelRequirement.cs`:
-
-```csharp
-/// <summary>
-/// 角色等級定義：數字越大，權限越高
-/// </summary>
-public enum RoleLevel
-{
-    User    = 1,
-    Manager = 2,
-    Admin   = 3
-}
-
-/// <summary>
-/// 要求：用戶的角色等級必須達到指定的最低等級
-/// </summary>
-public class MinimumRoleLevelRequirement : IAuthorizationRequirement
-{
-    public RoleLevel MinimumLevel { get; }
-
-    public MinimumRoleLevelRequirement(RoleLevel minimumLevel)
-    {
-        MinimumLevel = minimumLevel;
-    }
-}
-```
-
-#### Handler 實作
-
-`Handlers/MinimumRoleLevelAuthorizationHandler.cs`:
-
-```csharp
-public class MinimumRoleLevelAuthorizationHandler
-    : AuthorizationHandler<MinimumRoleLevelRequirement>
-{
-    // 角色名稱 → 等級的對應表
-    private static readonly Dictionary<string, RoleLevel> RoleLevelMap =
-        new(StringComparer.OrdinalIgnoreCase)
-    {
-        { "User",    RoleLevel.User    },
-        { "Manager", RoleLevel.Manager },
-        { "Admin",   RoleLevel.Admin   }
-    };
-
-    protected override Task HandleRequirementAsync(
-        AuthorizationHandlerContext context,
-        MinimumRoleLevelRequirement requirement)
-    {
-        // 取出用戶擁有的所有 Role Claims
-        var userRoles = context.User.FindAll(ClaimTypes.Role).Select(c => c.Value);
-
-        // 將角色名稱轉換為等級，取出最高等級
-        var highestLevel = userRoles
-            .Where(role => RoleLevelMap.ContainsKey(role))
-            .Select(role => RoleLevelMap[role])
-            .DefaultIfEmpty(0)
-            .Max();
-
-        if ((int)highestLevel >= (int)requirement.MinimumLevel)
-        {
-            context.Succeed(requirement);
-        }
-
-        return Task.CompletedTask;
-    }
-}
-```
-
-**這個 Handler 的優點：**
-
-```
-用戶只有 "User" 角色（等級 1）
-    → MinimumRoleLevelRequirement(Manager) 要求等級 2
-    → 1 < 2 → 授權失敗
-
-用戶有 "Manager" 角色（等級 2）
-    → MinimumRoleLevelRequirement(Manager) 要求等級 2
-    → 2 >= 2 → 授權成功
-
-用戶有 "Admin" 角色（等級 3）
-    → MinimumRoleLevelRequirement(Manager) 要求等級 2
-    → 3 >= 2 → Admin 自然通過 Manager 等級要求
-```
-
-### 在 Program.cs 中定義 Policies
-
-```csharp
-// 先註冊 Handlers
-builder.Services.AddScoped<IAuthorizationHandler, SameUserAuthorizationHandler>();
-builder.Services.AddScoped<IAuthorizationHandler, MinimumRoleLevelAuthorizationHandler>();
-
-// 定義具名授權策略
-builder.Services.AddAuthorization(options =>
-{
-    // 策略一：要求用戶已登入（最低門檻）
-    options.AddPolicy("AuthenticatedUser", policy =>
-        policy.RequireAuthenticatedUser());
-
-    // 策略二：要求 Manager 或以上等級
+    // 策略一：Manager 或以上等級（使用 Branch 9 定義的 Requirement）
     options.AddPolicy("ManagerOrAbove", policy =>
         policy.AddRequirements(new MinimumRoleLevelRequirement(RoleLevel.Manager)));
 
-    // 策略三：要求 Admin 等級
+    // 策略二：Admin 等級
     options.AddPolicy("AdminOnly", policy =>
         policy.AddRequirements(new MinimumRoleLevelRequirement(RoleLevel.Admin)));
 
-    // 策略四：組合多個要求（AND 邏輯）
+    // 策略三：組合多個 Requirement（AND 邏輯）
+    // 必須同時滿足：已登入 + Token 有 Name Claim + Admin 等級
     options.AddPolicy("StrictAdminOnly", policy =>
     {
         policy.RequireAuthenticatedUser();
         policy.RequireClaim(ClaimTypes.Name);
         policy.AddRequirements(new MinimumRoleLevelRequirement(RoleLevel.Admin));
     });
+
+    // FallbackPolicy：保護「忘記加 [Authorize]」的端點（見下方說明）
+    options.FallbackPolicy = new AuthorizationPolicyBuilder()
+        .RequireAuthenticatedUser()
+        .Build();
 });
 ```
 
 **Policy 的內建快捷方法：**
 
 ```csharp
-// 要求已認證
-policy.RequireAuthenticatedUser();
-
-// 要求擁有某個 Claim（只檢查 Key 存在）
-policy.RequireClaim("department");
-
-// 要求 Claim 等於特定值
-policy.RequireClaim("department", "Finance", "Accounting");
-
-// 要求擁有某個角色
-policy.RequireRole("Admin");
-
-// 要求同時擁有多個角色（AND）
-policy.RequireRole("Admin", "Auditor");  // 注意：此方法為 OR，非 AND
-
-// 自定義斷言（Assertion）
-policy.RequireAssertion(context =>
-    context.User.HasClaim(c => c.Type == "subscription" && c.Value == "premium"));
+policy.RequireAuthenticatedUser();              // 已登入
+policy.RequireClaim(ClaimTypes.Email);          // 有 Email Claim（不限值）
+policy.RequireClaim(ClaimTypes.Role, "Admin");  // Role Claim 值為 "Admin"
+policy.RequireRole("Admin");                    // 等同上一行
+policy.RequireAssertion(ctx =>                  // 任意自定義條件
+    ctx.User.HasClaim(c => c.Type == "subscription" && c.Value == "premium"));
 ```
 
-### 在 Controller 中使用 Policy
+---
 
-#### 特性方式（靜態）
+### 在 Controller 使用 `[Authorize(Policy = "...")]`
 
 ```csharp
-// 使用具名 Policy：Manager 或以上等級
+// 一行字引用複雜規則，不需要知道規則的細節
 [Authorize(Policy = "ManagerOrAbove")]
 [HttpGet("reports")]
 public IActionResult GetReports()
@@ -222,294 +109,233 @@ public IActionResult GetReports()
     return Ok("Reports for Manager and above.");
 }
 
-// 組合 Policy：嚴格的 Admin 檢查
+[Authorize(Policy = "AdminOnly")]
+[HttpGet("system-config")]
+public IActionResult GetSystemConfig()
+{
+    return Ok("System config, Admin only.");
+}
+
+// 組合 Policy：多個 Requirement 的 AND 組合
 [Authorize(Policy = "StrictAdminOnly")]
 [HttpDelete("users/{userId:guid}")]
 public async Task<IActionResult> DeleteUser(Guid userId)
 {
     var user = await authService.DeleteUserAsync(userId);
-    if (user is null) return NotFound("User not found.");
-    return Ok($"User {user.Username} has been deleted.");
+    if (user is null) return NotFound();
+    return Ok($"User {user.Username} deleted.");
 }
 ```
 
-#### 程式化方式（動態）
+#### 程式化 Policy 評估（by name）
+
+Branch 9 的程式化授權是傳入 `Requirement` 物件；Branch 10 改成傳入 **Policy 名稱**，Controller 不需要知道背後的規則：
 
 ```csharp
 [Authorize]
 [HttpGet("dashboard")]
 public async Task<IActionResult> GetDashboard()
 {
-    // 動態評估不同 Policy，根據結果返回不同內容
     var adminCheck = await authorizationService.AuthorizeAsync(User, "AdminOnly");
     if (adminCheck.Succeeded)
-    {
         return Ok(new { level = "Admin", data = "Full system dashboard." });
-    }
 
     var managerCheck = await authorizationService.AuthorizeAsync(User, "ManagerOrAbove");
     if (managerCheck.Succeeded)
-    {
         return Ok(new { level = "Manager", data = "Team performance dashboard." });
-    }
 
     return Ok(new { level = "User", data = "Personal activity dashboard." });
 }
 ```
 
-**程式化 Policy 評估的優點：**
+---
 
-不直接拒絕訪問（403），而是根據用戶等級返回不同的資料。這在建立「分級內容」的 API 時非常有用。
+### FallbackPolicy：讓「忘記加 [Authorize]」成為歷史
 
-### Policy vs Role vs Claim 的比較
+這是 Branch 10 引入的重要安全概念。
 
-| 特性 | Role-Based | Claim-Based | Policy-Based |
-|------|-----------|-------------|-------------|
-| 定義位置 | Controller 特性 | Handler | Program.cs 集中定義 |
-| 可重用性 | 低 | 中 | 高 |
-| 可組合性 | 低（只能 OR） | 中（需手動組合） | 高（AND/OR 自由組合） |
-| 可測試性 | 低 | 中 | 高 |
-| 適合場景 | 簡單存取控制 | 資源所有權 | 複雜業務規則 |
-| 程式化評估 | 需要 IsInRole() | 需要 AuthorizeAsync | AuthorizeAsync + Policy 名稱 |
+#### 問題：防禦性思維 vs 開放性思維
 
-**選擇指引：**
-
+**預設開放（歷史做法）：**
 ```
-需求：「只有 Admin 才能訪問」
-→ 使用 [Authorize(Roles = "Admin")]（簡單夠用）
-
-需求：「用戶只能修改自己的資料」
-→ 使用 IAuthorizationService + SameUserRequirement（資源授權）
-
-需求：「Manager 且訂閱等級為 Premium 才能訪問高級報告」
-→ 使用 Policy（複雜組合邏輯）
-
-需求：「未來可能修改條件的業務規則」
-→ 使用 Policy（集中管理，易於維護）
+預設：所有端點都公開
+需要保護時：加上 [Authorize]
+風險：忘記加 = 漏洞
 ```
 
-### 授權架構全貌
+**預設保護（FallbackPolicy）：**
+```
+預設：所有端點都需要登入（FallbackPolicy）
+需要公開時：加上 [AllowAnonymous]
+好處：忘記加 = 安全（只是多一層保護）
+```
 
-至此，本系列教學涵蓋了 ASP.NET Core 授權的完整架構：
+#### 實作 FallbackPolicy
+
+**Step 1：在 Program.cs 設定 FallbackPolicy**
+
+```csharp
+options.FallbackPolicy = new AuthorizationPolicyBuilder()
+    .RequireAuthenticatedUser()
+    .Build();
+```
+
+**Step 2：在公開端點加上 `[AllowAnonymous]`**
+
+```csharp
+[AllowAnonymous]  // ← 明確豁免，可以不帶 Token 訪問
+[HttpPost("register")]
+public async Task<ActionResult<User>> Register(UserDto request) { ... }
+
+[AllowAnonymous]
+[HttpPost("login")]
+public async Task<ActionResult<TokenResponseDto>> Login(UserDto request) { ... }
+
+[AllowAnonymous]
+[HttpPost("refresh-token")]
+public async Task<ActionResult<TokenResponseDto>> RefreshToken(...) { ... }
+```
+
+#### FallbackPolicy vs DefaultPolicy
+
+```csharp
+// DefaultPolicy：[Authorize] 沒有指定任何條件時，使用這個 Policy
+// 預設是 RequireAuthenticatedUser()
+options.DefaultPolicy = ...
+
+// FallbackPolicy：完全沒有 [Authorize] 特性的端點，套用這個 Policy
+// 預設是 null（即沒有任何保護）
+options.FallbackPolicy = ...
+```
+
+| | DefaultPolicy | FallbackPolicy |
+|---|---|---|
+| 觸發條件 | `[Authorize]`（沒有參數） | 完全沒有 `[Authorize]` |
+| 預設值 | `RequireAuthenticatedUser()` | `null`（不保護） |
+| 用途 | 統一無參數 `[Authorize]` 的行為 | 全局預設保護 |
+
+---
+
+### Policy 的組成與 AND 邏輯
+
+Policy 中所有條件都是 **AND**：
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    授權架構                                  │
-├─────────────────┬──────────────────┬────────────────────────┤
-│   Role-Based    │   Claim-Based    │    Policy-Based        │
-├─────────────────┼──────────────────┼────────────────────────┤
-│ [Authorize      │ IAuthorization   │ [Authorize             │
-│  (Roles="...")]  │ Service +        │  (Policy="...")]        │
-│                 │ Requirement +    │ AddAuthorization()     │
-│                 │ Handler          │ + Requirements         │
-│                 │                  │ + Handlers             │
-├─────────────────┼──────────────────┼────────────────────────┤
-│ 粗粒度          │ 細粒度            │ 業務邏輯封裝            │
-│ 快速實作        │ 資源授權          │ 可重用、可測試          │
-└─────────────────┴──────────────────┴────────────────────────┘
+Policy "StrictAdminOnly"
+    ├── RequireAuthenticatedUser()    必須滿足
+    ├── RequireClaim(ClaimTypes.Name) 必須滿足
+    └── MinimumRoleLevelRequirement   必須滿足
+    ↓ 全部通過 → 授權成功，缺一不可
 ```
+
+若要 OR 邏輯，在 Handler 內部實現（Branch 9 已示範過）。
 
 ---
 
 ## 測試 API 端點
 
-### 測試 Policy 端點
+### 驗證 FallbackPolicy
 
-**準備：** 確保有三種等級的用戶：
-- `alice` - Role: "User"
-- `bob` - Role: "Manager"
-- `charlie` - Role: "Admin"
+用**沒有 Token** 的請求存取各端點：
 
-**測試 ManagerOrAbove Policy：**
+| 端點 | 預期結果 | 原因 |
+|------|---------|------|
+| `POST /api/auth/register` | `200 OK` | `[AllowAnonymous]` 豁免 |
+| `POST /api/auth/login` | `200 OK` | `[AllowAnonymous]` 豁免 |
+| `GET /api/auth` | `401 Unauthorized` | FallbackPolicy 生效 |
+| `GET /api/auth/profile` | `401 Unauthorized` | FallbackPolicy 生效 |
 
-| 用戶 | 請求 | 預期結果 |
-|------|------|---------|
-| alice (User) | `GET /api/auth/reports` | `403 Forbidden` |
-| bob (Manager) | `GET /api/auth/reports` | `200 OK` |
-| charlie (Admin) | `GET /api/auth/reports` | `200 OK` |
+### 驗證 Policy 端點
 
-**測試 AdminOnly Policy：**
+準備三個用戶：`alice`（User）、`bob`（Manager）、`charlie`（Admin）
 
-| 用戶 | 請求 | 預期結果 |
-|------|------|---------|
-| alice (User) | `GET /api/auth/system-config` | `403 Forbidden` |
-| bob (Manager) | `GET /api/auth/system-config` | `403 Forbidden` |
-| charlie (Admin) | `GET /api/auth/system-config` | `200 OK` |
+**`GET /api/auth/reports` - ManagerOrAbove Policy**
 
-**測試動態 Dashboard：**
+| 用戶 | 預期 |
+|------|------|
+| alice | `403 Forbidden` |
+| bob | `200 OK` |
+| charlie | `200 OK` |
 
-| 用戶 | 請求 | 預期結果 |
-|------|------|---------|
-| alice (User) | `GET /api/auth/dashboard` | `200 OK` - Personal dashboard |
-| bob (Manager) | `GET /api/auth/dashboard` | `200 OK` - Team dashboard |
-| charlie (Admin) | `GET /api/auth/dashboard` | `200 OK` - Full dashboard |
+**`GET /api/auth/system-config` - AdminOnly Policy**
+
+| 用戶 | 預期 |
+|------|------|
+| alice | `403 Forbidden` |
+| bob | `403 Forbidden` |
+| charlie | `200 OK` |
 
 ---
 
-## Policy 測試策略
+## 授權方式完整比較
 
-Policy 的集中定義讓**單元測試**變得更容易：
-
-```csharp
-// 測試 Policy 定義（單元測試）
-[Test]
-public async Task ManagerOrAbove_AdminUser_ShouldSucceed()
-{
-    // Arrange
-    var user = CreateClaimsPrincipal(roles: new[] { "Admin" });
-    var authService = BuildAuthorizationService(ConfigureTestPolicies);
-
-    // Act
-    var result = await authService.AuthorizeAsync(user, "ManagerOrAbove");
-
-    // Assert
-    Assert.IsTrue(result.Succeeded);
-}
-```
-
-這種測試方式比測試整個 HTTP 請求更快速、更可靠。
+| 授權方式 | 定義位置 | 能否組合 | 能傳 Resource | 適合場景 |
+|---------|---------|---------|--------------|---------|
+| `[Authorize(Roles)]` | Controller 特性 | 僅 OR | ❌ | 簡單角色檢查 |
+| `IAuthorizationService` + Requirement | Controller 方法內 | ✅ | ✅ | 資源所有權 |
+| `[Authorize(Policy)]` | Program.cs 集中 | ✅ AND | ❌（靜態） | 複雜業務規則、可重用 |
+| `IAuthorizationService` + Policy name | Controller 方法內 | ✅ AND | ❌ | 分級內容、動態判斷 |
 
 ---
 
 ## 最佳實踐
 
-**1. 使用常數定義 Policy 名稱，避免拼寫錯誤**
+**1. Policy 名稱用常數，避免魔術字串**
 
 ```csharp
 public static class Policies
 {
-    public const string AuthenticatedUser = "AuthenticatedUser";
-    public const string ManagerOrAbove   = "ManagerOrAbove";
-    public const string AdminOnly        = "AdminOnly";
+    public const string ManagerOrAbove = "ManagerOrAbove";
+    public const string AdminOnly      = "AdminOnly";
+    public const string StrictAdmin    = "StrictAdminOnly";
 }
 
 [Authorize(Policy = Policies.AdminOnly)]
 ```
 
-**2. Policy 命名用業務語言，而非技術語言**
+**2. Policy 命名用業務語言**
 
 ```csharp
-// ✅ 好：反映業務需求
-options.AddPolicy("CanViewFinancialReports", ...);
-options.AddPolicy("CanApproveLeaveRequests", ...);
+// ✅ 反映業務
+"CanApproveLeaveRequests"
+"CanViewFinancialReports"
 
-// ❌ 不好：技術性的，難以理解業務含義
-options.AddPolicy("RoleLevel2OrAbove", ...);
+// ❌ 技術語言，難以理解
+"RoleLevel2OrAbove"
 ```
 
-**3. 複雜 Policy 應有對應的單元測試**
+**3. 預設保護（FallbackPolicy）是更安全的架構選擇**
 
 ```csharp
-// 每個 Policy 都應該有測試覆蓋邊界條件
-[Test] public async Task ManagerOrAbove_ManagerUser_ShouldSucceed() { ... }
-[Test] public async Task ManagerOrAbove_UserRole_ShouldFail() { ... }
-[Test] public async Task ManagerOrAbove_NoRole_ShouldFail() { ... }
-[Test] public async Task ManagerOrAbove_AdminUser_ShouldSucceed() { ... }
+// ✅ 建議：預設保護，公開端點明確豁免
+options.FallbackPolicy = new AuthorizationPolicyBuilder()
+    .RequireAuthenticatedUser().Build();
+// 公開端點加 [AllowAnonymous]
 ```
-
-**4. 在 Program.cs 集中定義，不要分散**
-
-```csharp
-// ✅ 好：全部在 Program.cs 的 AddAuthorization() 中
-builder.Services.AddAuthorization(options =>
-{
-    options.AddPolicy(...);
-    options.AddPolicy(...);
-});
-
-// ❌ 不好：使用 Extension Method 分散定義，難以一覽全局
-builder.Services.AddUserPolicies();
-builder.Services.AddAdminPolicies();
-```
-
----
-
-## 常見問題
-
-### Q: Policy 中的多個 Requirement 是 AND 還是 OR？
-
-**答：** 是 **AND**。Policy 中的所有 Requirement 都必須滿足，授權才會成功。若需要 OR 邏輯，應在單一 Handler 內部實現：
-
-```csharp
-// OR 邏輯：在 Handler 中實現
-protected override Task HandleRequirementAsync(...)
-{
-    if (conditionA || conditionB)  // OR 在這裡
-        context.Succeed(requirement);
-}
-```
-
-### Q: `[Authorize(Roles = "Admin")]` 和 `[Authorize(Policy = "AdminOnly")]` 有什麼差別？
-
-功能相同，但 Policy 更靈活：
-- `Roles` 只能檢查角色，未來難以擴充
-- Policy 可以組合任意 Requirements，業務規則變化時只需修改 Program.cs
-
-**最佳實踐：** 複雜或可能變化的授權規則使用 Policy；簡單的角色檢查可以直接用 `Roles`。
-
-### Q: 可以同時使用多個 `[Authorize]` 特性（堆疊）嗎？
-
-**可以。** 堆疊的 `[Authorize]` 特性是 AND 邏輯：
-
-```csharp
-[Authorize(Policy = "ManagerOrAbove")]
-[Authorize(Policy = "AuthenticatedUser")]
-public IActionResult StackedPolicies() { ... }
-// 兩個 Policy 都必須通過
-```
-
-但通常可以直接在單一 Policy 中組合多個 Requirement，更清晰：
-
-```csharp
-options.AddPolicy("VerifiedManager", policy =>
-{
-    policy.RequireAuthenticatedUser();
-    policy.AddRequirements(new MinimumRoleLevelRequirement(RoleLevel.Manager));
-});
-```
-
----
-
-## 安全性提示
-
-⚠️ **重要注意事項：**
-
-1. **定期審查 Policy 定義** - 隨著業務變化，Policy 的要求可能需要更新
-2. **Policy 的 Default Policy** - 可設置全局默認 Policy，確保所有端點都有基本保護
-   ```csharp
-   options.DefaultPolicy = new AuthorizationPolicyBuilder()
-       .RequireAuthenticatedUser()
-       .Build();
-   ```
-3. **FallbackPolicy** - 設置未標記 `[Authorize]` 的端點也需認證
-   ```csharp
-   options.FallbackPolicy = options.DefaultPolicy;
-   ```
 
 ---
 
 ## 課程總結
 
-恭喜完成整個 JWT 認證授權系列！以下是完整的學習路徑：
+恭喜完成整個 JWT 認證授權系列！
 
 | 分支 | 主題 | 核心概念 |
 |------|------|---------|
 | 1 | 用戶註冊與登入 | BCrypt 密碼雜湊 |
 | 2 | 生成 JWT Token | JWT 結構、Claims、簽名 |
-| 3 | 連接資料庫 | EF Core、SQLServer |
+| 3 | 連接資料庫 | EF Core、SQL Server |
 | 4 | Service 層重構 | 依賴注入、分層架構 |
 | 5 | 端點安全保護 | JWT Bearer Middleware、[Authorize] |
 | 6 | 基本角色授權 | ClaimTypes.Role、[Authorize(Roles)] |
 | 7 | 刷新令牌 | Refresh Token、Token 輪換 |
 | 8 | 深入角色授權 | 多重角色、角色管理 API |
-| 9 | Claim 授權 | IAuthorizationRequirement、Handler、資源授權 |
-| **10** | **Policy 授權** | **AddAuthorization、具名 Policy、組合規則** |
+| 9 | **Claim-Based 授權** | **Requirement + Handler + 資源授權（Runtime）** |
+| **10** | **Policy-Based 授權** | **集中命名、多條件組合、FallbackPolicy** |
 
 ---
 
 ## 參考資源
 
-- [ASP.NET Core Policy-Based Authorization 文檔](https://docs.microsoft.com/en-us/aspnet/core/security/authorization/policies)
-- [AuthorizationOptions.AddPolicy 文檔](https://docs.microsoft.com/en-us/dotnet/api/microsoft.aspnetcore.authorization.authorizationoptions.addpolicy)
-- [ASP.NET Core 授權簡介](https://docs.microsoft.com/en-us/aspnet/core/security/authorization/introduction)
-- [OWASP 訪問控制速查表](https://cheatsheetseries.owasp.org/cheatsheets/Access_Control_Cheat_Sheet.html)
+- [ASP.NET Core Policy-Based Authorization](https://docs.microsoft.com/en-us/aspnet/core/security/authorization/policies)
+- [AuthorizationOptions 文檔](https://docs.microsoft.com/en-us/dotnet/api/microsoft.aspnetcore.authorization.authorizationoptions)
+- [ASP.NET Core 授權概覽](https://docs.microsoft.com/en-us/aspnet/core/security/authorization/introduction)

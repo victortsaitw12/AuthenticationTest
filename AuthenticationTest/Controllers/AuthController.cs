@@ -12,6 +12,8 @@ namespace AuthenticationTest.Controllers
     [ApiController]
     public class AuthController(IAuthService authService, IAuthorizationService authorizationService) : ControllerBase
     {
+        // FallbackPolicy 讓所有端點預設需要登入，用 [AllowAnonymous] 明確豁免公開端點
+        [AllowAnonymous]
         [HttpPost("register")]
         public async Task<ActionResult<User>> Register(UserDto request)
         {
@@ -23,6 +25,7 @@ namespace AuthenticationTest.Controllers
             return Ok(user);
         }
 
+        [AllowAnonymous]
         [HttpPost("login")]
         public async Task<ActionResult<TokenResponseDto>> Login(UserDto request)
         {
@@ -35,6 +38,7 @@ namespace AuthenticationTest.Controllers
             return Ok(result);
         }
 
+        [AllowAnonymous]
         [HttpPost("refresh-token")]
         public async Task<ActionResult<TokenResponseDto>> RefreshToken(RefreshTokenRequestDto request)
         {

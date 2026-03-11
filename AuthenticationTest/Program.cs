@@ -45,25 +45,27 @@ builder.Services.AddScoped<IAuthorizationHandler, MinimumRoleLevelAuthorizationH
 // 定義具名授權策略（Policy-Based Authorization）
 builder.Services.AddAuthorization(options =>
 {
-    // 策略一：要求用戶已登入（最低門檻）
-    options.AddPolicy("AuthenticatedUser", policy =>
-        policy.RequireAuthenticatedUser());
-
-    // 策略二：要求具備 Manager 或以上等級
+    // 策略一：要求具備 Manager 或以上等級
     options.AddPolicy("ManagerOrAbove", policy =>
         policy.AddRequirements(new MinimumRoleLevelRequirement(RoleLevel.Manager)));
 
-    // 策略三：要求具備 Admin 等級
+    // 策略二：要求具備 Admin 等級
     options.AddPolicy("AdminOnly", policy =>
         policy.AddRequirements(new MinimumRoleLevelRequirement(RoleLevel.Admin)));
 
-    // 策略四：組合多個要求（AND 邏輯）- 必須是 Admin 且 Token 包含 Name Claim
+    // 策略三：組合多個要求（AND 邏輯）
     options.AddPolicy("StrictAdminOnly", policy =>
     {
         policy.RequireAuthenticatedUser();
         policy.RequireClaim(System.Security.Claims.ClaimTypes.Name);
         policy.AddRequirements(new MinimumRoleLevelRequirement(RoleLevel.Admin));
     });
+
+    // FallbackPolicy：未標記任何 [Authorize] 的端點，也預設要求已登入
+    // 標記 [AllowAnonymous] 的端點可明確豁免
+    options.FallbackPolicy = new AuthorizationPolicyBuilder()
+        .RequireAuthenticatedUser()
+        .Build();
 });
 
 var app = builder.Build();
