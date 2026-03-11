@@ -15,6 +15,16 @@
 
 ---
 
+## 本分支異動的檔案
+
+| 狀態 | 檔案 | 異動內容 |
+|------|------|---------|
+| 修改 | `Services/IAuthService.cs` | 新增 `GrantRoleAsync`、`RevokeRoleAsync` |
+| 修改 | `Services/AuthService.cs` | `CreateToken()` 改為多 Role Claim；實作 `GrantRoleAsync`、`RevokeRoleAsync` |
+| 修改 | `Controllers/AuthController.cs` | 新增 `profile`、`management`、`grant-role`、`revoke-role` 端點 |
+
+---
+
 ## 第十一步：多重角色支援
 
 ### 問題：單一角色欄位的限制
