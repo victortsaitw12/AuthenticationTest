@@ -151,6 +151,33 @@ namespace AuthenticationTest.Controllers
             return Ok($"User {user.Username} has been deleted.");
         }
 
+        // ── IAuthorizationRequirementData 示範端點 ────────────────────────────
+
+        // 直接使用 Attribute 攜帶授權資料，不需要 Policy 名稱字串
+        [MinimumRoleLevel(RoleLevel.Manager)]
+        [HttpGet("reports-v2")]
+        public IActionResult GetReportsV2()
+        {
+            return Ok("Reports (v2, via attribute): Manager and above.");
+        }
+
+        [MinimumRoleLevel(RoleLevel.Admin)]
+        [HttpGet("system-config-v2")]
+        public IActionResult GetSystemConfigV2()
+        {
+            return Ok("System config (v2, via attribute): Admin only.");
+        }
+
+        // 多個 Attribute 堆疊 = AND 邏輯（需同時滿足兩個等級要求中的最高者）
+        // 實際上因為同一 Handler 會被呼叫兩次，兩個都必須 Succeed
+        [MinimumRoleLevel(RoleLevel.Manager)]
+        [MinimumRoleLevel(RoleLevel.Admin)]
+        [HttpGet("strict-admin-v2")]
+        public IActionResult GetStrictAdminV2()
+        {
+            return Ok("Strict admin (v2, via stacked attributes).");
+        }
+
         // 程式化 Policy 評估：在方法內部動態決定使用哪個 Policy
         [Authorize]
         [HttpGet("dashboard")]

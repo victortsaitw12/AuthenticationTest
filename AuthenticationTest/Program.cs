@@ -42,6 +42,9 @@ builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<IAuthorizationHandler, SameUserAuthorizationHandler>();
 builder.Services.AddScoped<IAuthorizationHandler, MinimumRoleLevelAuthorizationHandler>();
 
+// 新增：註冊 IAuthorizationRequirementData 模式的 Handler
+builder.Services.AddScoped<IAuthorizationHandler, MinimumRoleLevelAttributeHandler>();
+
 // 定義具名授權策略（Policy-Based Authorization）
 builder.Services.AddAuthorization(options =>
 {
